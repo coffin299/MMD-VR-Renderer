@@ -77,6 +77,30 @@ enum {
 static RenderSettings* g_settings = nullptr;
 static bool g_ok = false;
 static HBRUSH g_yellowBrush = nullptr;
+static HFONT g_uiFont = nullptr;
+
+static HFONT ensureUiFont() {
+  if (g_uiFont) return g_uiFont;
+  // Compact 9pt — default system UI font reads large on this dense form.
+  g_uiFont = CreateFontW(
+      -12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+      OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+      DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+  if (!g_uiFont)
+    g_uiFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+  return g_uiFont;
+}
+
+static void applyUiFont(HWND root) {
+  HFONT font = ensureUiFont();
+  EnumChildWindows(
+      root,
+      [](HWND child, LPARAM lp) -> BOOL {
+        SendMessageW(child, WM_SETFONT, (WPARAM)lp, TRUE);
+        return TRUE;
+      },
+      (LPARAM)font);
+}
 
 static void setText(HWND h, int id, const std::wstring& t) {
   SetDlgItemTextW(h, id, t.c_str());
@@ -298,6 +322,7 @@ static INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM) {
   case WM_INITDIALOG: {
     auto& s = *g_settings;
     s.applyResolutionPreset();
+    applyUiFont(hDlg);
     SendDlgItemMessageW(hDlg, IDC_VRMODE, CB_RESETCONTENT, 0, 0);
     SendDlgItemMessageW(hDlg, IDC_VRMODE, CB_ADDSTRING, 0, (LPARAM)L"VR180");
     SendDlgItemMessageW(hDlg, IDC_VRMODE, CB_ADDSTRING, 0, (LPARAM)L"VR360");
@@ -439,8 +464,8 @@ bool ShowRenderDialog(HWND owner, RenderSettings& settings) {
   INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_LINK_CLASS};
   InitCommonControlsEx(&icc);
 
-  constexpr int kClientW = 760;
-  constexpr int kClientH = 1100;
+  constexpr int kClientW = 700;
+  constexpr int kClientH = 920;
   const DWORD style = WS_CAPTION | WS_POPUP | WS_SYSMENU;
   const DWORD exStyle = WS_EX_DLGMODALFRAME;
 
@@ -469,78 +494,78 @@ bool ShowRenderDialog(HWND owner, RenderSettings& settings) {
       const DWORD stMulti = WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOPREFIX;
       const DWORD stChk = st | BS_AUTOCHECKBOX | BS_MULTILINE | BS_TOP;
 
-      CreateWindowW(L"BUTTON", L"日本語", st, 560, 10, 80, 26, hWnd, (HMENU)IDC_LANG_JA, 0, 0);
-      CreateWindowW(L"BUTTON", L"English", st, 650, 10, 80, 26, hWnd, (HMENU)IDC_LANG_EN, 0, 0);
+      CreateWindowW(L"BUTTON", L"日本語", st, 520, 8, 70, 22, hWnd, (HMENU)IDC_LANG_JA, 0, 0);
+      CreateWindowW(L"BUTTON", L"English", st, 598, 8, 70, 22, hWnd, (HMENU)IDC_LANG_EN, 0, 0);
 
-      CreateWindowW(L"STATIC", L"", st, 24, 44, 160, 22, hWnd, (HMENU)IDC_LBL_VRMODE, 0, 0);
-      CreateWindowW(L"COMBOBOX", L"", st | CBS_DROPDOWNLIST, 200, 42, 520, 220, hWnd, (HMENU)IDC_VRMODE, 0, 0);
-      CreateWindowW(L"STATIC", L"", st, 24, 76, 160, 22, hWnd, (HMENU)IDC_LBL_STEREO, 0, 0);
-      CreateWindowW(L"COMBOBOX", L"", st | CBS_DROPDOWNLIST, 200, 74, 520, 220, hWnd, (HMENU)IDC_STEREO, 0, 0);
-      CreateWindowW(L"STATIC", L"", st, 24, 108, 160, 22, hWnd, (HMENU)IDC_LBL_QUALITY, 0, 0);
-      CreateWindowW(L"COMBOBOX", L"", st | CBS_DROPDOWNLIST, 200, 106, 520, 220, hWnd, (HMENU)IDC_QUALITY, 0, 0);
+      CreateWindowW(L"STATIC", L"", st, 16, 36, 140, 18, hWnd, (HMENU)IDC_LBL_VRMODE, 0, 0);
+      CreateWindowW(L"COMBOBOX", L"", st | CBS_DROPDOWNLIST, 170, 34, 500, 200, hWnd, (HMENU)IDC_VRMODE, 0, 0);
+      CreateWindowW(L"STATIC", L"", st, 16, 60, 140, 18, hWnd, (HMENU)IDC_LBL_STEREO, 0, 0);
+      CreateWindowW(L"COMBOBOX", L"", st | CBS_DROPDOWNLIST, 170, 58, 500, 200, hWnd, (HMENU)IDC_STEREO, 0, 0);
+      CreateWindowW(L"STATIC", L"", st, 16, 84, 140, 18, hWnd, (HMENU)IDC_LBL_QUALITY, 0, 0);
+      CreateWindowW(L"COMBOBOX", L"", st | CBS_DROPDOWNLIST, 170, 82, 500, 200, hWnd, (HMENU)IDC_QUALITY, 0, 0);
 
-      CreateWindowW(L"STATIC", L"", st, 24, 140, 160, 22, hWnd, (HMENU)IDC_LBL_RES, 0, 0);
-      CreateWindowW(L"COMBOBOX", L"", st | CBS_DROPDOWNLIST, 200, 138, 520, 220, hWnd, (HMENU)IDC_RESOLUTION, 0, 0);
-      CreateWindowW(L"STATIC", L"", st, 24, 172, 160, 40, hWnd, (HMENU)IDC_LBL_SIZE, 0, 0);
-      CreateWindowW(L"STATIC", L"", stMulti, 200, 172, 520, 40, hWnd, (HMENU)IDC_SIZEINFO, 0, 0);
+      CreateWindowW(L"STATIC", L"", st, 16, 108, 140, 18, hWnd, (HMENU)IDC_LBL_RES, 0, 0);
+      CreateWindowW(L"COMBOBOX", L"", st | CBS_DROPDOWNLIST, 170, 106, 500, 200, hWnd, (HMENU)IDC_RESOLUTION, 0, 0);
+      CreateWindowW(L"STATIC", L"", st, 16, 132, 140, 32, hWnd, (HMENU)IDC_LBL_SIZE, 0, 0);
+      CreateWindowW(L"STATIC", L"", stMulti, 170, 132, 500, 32, hWnd, (HMENU)IDC_SIZEINFO, 0, 0);
 
-      CreateWindowW(L"STATIC", L"", st, 24, 222, 160, 22, hWnd, (HMENU)IDC_LBL_FPS, 0, 0);
-      CreateWindowW(L"EDIT", L"", st | WS_BORDER, 200, 220, 80, 24, hWnd, (HMENU)IDC_FPS, 0, 0);
-      CreateWindowW(L"STATIC", L"", st, 300, 222, 110, 22, hWnd, (HMENU)IDC_LBL_THREADS, 0, 0);
-      CreateWindowW(L"EDIT", L"", st | WS_BORDER, 420, 220, 64, 24, hWnd, (HMENU)IDC_THREADS, 0, 0);
-      CreateWindowW(L"STATIC", L"", st, 500, 222, 120, 22, hWnd, (HMENU)IDC_LBL_THREADS_HINT, 0, 0);
+      CreateWindowW(L"STATIC", L"", st, 16, 170, 140, 18, hWnd, (HMENU)IDC_LBL_FPS, 0, 0);
+      CreateWindowW(L"EDIT", L"", st | WS_BORDER, 170, 168, 64, 20, hWnd, (HMENU)IDC_FPS, 0, 0);
+      CreateWindowW(L"STATIC", L"", st, 250, 170, 90, 18, hWnd, (HMENU)IDC_LBL_THREADS, 0, 0);
+      CreateWindowW(L"EDIT", L"", st | WS_BORDER, 350, 168, 50, 20, hWnd, (HMENU)IDC_THREADS, 0, 0);
+      CreateWindowW(L"STATIC", L"", st, 410, 170, 90, 18, hWnd, (HMENU)IDC_LBL_THREADS_HINT, 0, 0);
 
-      CreateWindowW(L"STATIC", L"", st, 24, 256, 160, 22, hWnd, (HMENU)IDC_LBL_FACE, 0, 0);
-      CreateWindowW(L"COMBOBOX", L"", st | CBS_DROPDOWNLIST, 200, 254, 170, 220, hWnd, (HMENU)IDC_FACE, 0, 0);
-      CreateWindowW(L"STATIC", L"", st, 390, 256, 80, 22, hWnd, (HMENU)IDC_LBL_WRITE, 0, 0);
-      CreateWindowW(L"COMBOBOX", L"", st | CBS_DROPDOWNLIST, 475, 254, 64, 220, hWnd, (HMENU)IDC_WRITE_THREADS, 0, 0);
-      CreateWindowW(L"STATIC", L"", st, 555, 256, 55, 22, hWnd, (HMENU)IDC_LBL_QUEUE, 0, 0);
-      CreateWindowW(L"COMBOBOX", L"", st | CBS_DROPDOWNLIST, 615, 254, 120, 220, hWnd, (HMENU)IDC_WRITE_QUEUE, 0, 0);
-      CreateWindowW(L"STATIC", L"", stMulti, 24, 286, 710, 40, hWnd, (HMENU)IDC_LBL_FACE_HINT, 0, 0);
+      CreateWindowW(L"STATIC", L"", st, 16, 196, 140, 18, hWnd, (HMENU)IDC_LBL_FACE, 0, 0);
+      CreateWindowW(L"COMBOBOX", L"", st | CBS_DROPDOWNLIST, 170, 194, 160, 200, hWnd, (HMENU)IDC_FACE, 0, 0);
+      CreateWindowW(L"STATIC", L"", st, 345, 196, 60, 18, hWnd, (HMENU)IDC_LBL_WRITE, 0, 0);
+      CreateWindowW(L"COMBOBOX", L"", st | CBS_DROPDOWNLIST, 410, 194, 50, 200, hWnd, (HMENU)IDC_WRITE_THREADS, 0, 0);
+      CreateWindowW(L"STATIC", L"", st, 475, 196, 45, 18, hWnd, (HMENU)IDC_LBL_QUEUE, 0, 0);
+      CreateWindowW(L"COMBOBOX", L"", st | CBS_DROPDOWNLIST, 525, 194, 110, 200, hWnd, (HMENU)IDC_WRITE_QUEUE, 0, 0);
+      CreateWindowW(L"STATIC", L"", stMulti, 16, 218, 650, 30, hWnd, (HMENU)IDC_LBL_FACE_HINT, 0, 0);
 
-      CreateWindowW(L"STATIC", L"", st, 24, 334, 160, 22, hWnd, (HMENU)IDC_LBL_IPD, 0, 0);
-      CreateWindowW(L"EDIT", L"", st | WS_BORDER, 200, 332, 80, 24, hWnd, (HMENU)IDC_IPD, 0, 0);
+      CreateWindowW(L"STATIC", L"", st, 16, 254, 140, 18, hWnd, (HMENU)IDC_LBL_IPD, 0, 0);
+      CreateWindowW(L"EDIT", L"", st | WS_BORDER, 170, 252, 64, 20, hWnd, (HMENU)IDC_IPD, 0, 0);
 
-      CreateWindowW(L"STATIC", L"", st, 24, 368, 160, 22, hWnd, (HMENU)IDC_LBL_FSTART, 0, 0);
-      CreateWindowW(L"EDIT", L"", st | WS_BORDER, 200, 366, 110, 24, hWnd, (HMENU)IDC_FSTART, 0, 0);
-      CreateWindowW(L"STATIC", L"", st, 340, 368, 160, 22, hWnd, (HMENU)IDC_LBL_FEND, 0, 0);
-      CreateWindowW(L"EDIT", L"", st | WS_BORDER, 510, 366, 110, 24, hWnd, (HMENU)IDC_FEND, 0, 0);
+      CreateWindowW(L"STATIC", L"", st, 16, 278, 140, 18, hWnd, (HMENU)IDC_LBL_FSTART, 0, 0);
+      CreateWindowW(L"EDIT", L"", st | WS_BORDER, 170, 276, 90, 20, hWnd, (HMENU)IDC_FSTART, 0, 0);
+      CreateWindowW(L"STATIC", L"", st, 290, 278, 140, 18, hWnd, (HMENU)IDC_LBL_FEND, 0, 0);
+      CreateWindowW(L"EDIT", L"", st | WS_BORDER, 440, 276, 90, 20, hWnd, (HMENU)IDC_FEND, 0, 0);
 
-      CreateWindowW(L"STATIC", L"", st, 24, 402, 160, 22, hWnd, (HMENU)IDC_LBL_PROJECT, 0, 0);
-      CreateWindowW(L"EDIT", L"", st | WS_BORDER | ES_AUTOHSCROLL, 200, 400, 520, 24, hWnd, (HMENU)IDC_PROJECT, 0, 0);
+      CreateWindowW(L"STATIC", L"", st, 16, 304, 140, 18, hWnd, (HMENU)IDC_LBL_PROJECT, 0, 0);
+      CreateWindowW(L"EDIT", L"", st | WS_BORDER | ES_AUTOHSCROLL, 170, 302, 500, 20, hWnd, (HMENU)IDC_PROJECT, 0, 0);
 
-      CreateWindowW(L"STATIC", L"", st, 24, 436, 160, 22, hWnd, (HMENU)IDC_LBL_OUT, 0, 0);
-      CreateWindowW(L"EDIT", L"", st | WS_BORDER | ES_AUTOHSCROLL, 200, 434, 470, 24, hWnd, (HMENU)IDC_OUTDIR, 0, 0);
-      CreateWindowW(L"BUTTON", L"...", st, 680, 434, 40, 24, hWnd, (HMENU)IDC_BROWSE, 0, 0);
+      CreateWindowW(L"STATIC", L"", st, 16, 330, 140, 18, hWnd, (HMENU)IDC_LBL_OUT, 0, 0);
+      CreateWindowW(L"EDIT", L"", st | WS_BORDER | ES_AUTOHSCROLL, 170, 328, 460, 20, hWnd, (HMENU)IDC_OUTDIR, 0, 0);
+      CreateWindowW(L"BUTTON", L"...", st, 640, 328, 32, 20, hWnd, (HMENU)IDC_BROWSE, 0, 0);
 
-      CreateWindowW(L"BUTTON", L"", stChk, 200, 470, 520, 40, hWnd, (HMENU)IDC_ENCODE, 0, 0);
-      CreateWindowW(L"STATIC", L"", st, 24, 520, 160, 22, hWnd, (HMENU)IDC_LBL_ENCODE_CODEC, 0, 0);
-      CreateWindowW(L"COMBOBOX", L"", st | CBS_DROPDOWNLIST, 200, 518, 520, 220, hWnd, (HMENU)IDC_ENCODE_CODEC, 0, 0);
-      CreateWindowW(L"STATIC", L"", st, 24, 554, 160, 22, hWnd, (HMENU)IDC_LBL_AUDIO, 0, 0);
-      CreateWindowW(L"EDIT", L"", st | WS_BORDER | ES_AUTOHSCROLL, 200, 552, 430, 24, hWnd, (HMENU)IDC_AUDIO, 0, 0);
-      CreateWindowW(L"BUTTON", L"...", st, 640, 552, 40, 24, hWnd, (HMENU)IDC_BROWSE_AUDIO, 0, 0);
-      CreateWindowW(L"STATIC", L"", stMulti, 24, 584, 710, 36, hWnd, (HMENU)IDC_LBL_AUDIO_HINT, 0, 0);
-      CreateWindowW(L"BUTTON", L"", stChk, 200, 628, 520, 40, hWnd, (HMENU)IDC_CUBEMAP, 0, 0);
-      CreateWindowW(L"STATIC", L"", stMulti, 24, 674, 710, 36, hWnd, (HMENU)IDC_LBL_CUBEMAP_HINT, 0, 0);
+      CreateWindowW(L"BUTTON", L"", stChk, 170, 356, 500, 32, hWnd, (HMENU)IDC_ENCODE, 0, 0);
+      CreateWindowW(L"STATIC", L"", st, 16, 396, 140, 18, hWnd, (HMENU)IDC_LBL_ENCODE_CODEC, 0, 0);
+      CreateWindowW(L"COMBOBOX", L"", st | CBS_DROPDOWNLIST, 170, 394, 500, 200, hWnd, (HMENU)IDC_ENCODE_CODEC, 0, 0);
+      CreateWindowW(L"STATIC", L"", st, 16, 422, 140, 18, hWnd, (HMENU)IDC_LBL_AUDIO, 0, 0);
+      CreateWindowW(L"EDIT", L"", st | WS_BORDER | ES_AUTOHSCROLL, 170, 420, 430, 20, hWnd, (HMENU)IDC_AUDIO, 0, 0);
+      CreateWindowW(L"BUTTON", L"...", st, 610, 420, 32, 20, hWnd, (HMENU)IDC_BROWSE_AUDIO, 0, 0);
+      CreateWindowW(L"STATIC", L"", stMulti, 16, 446, 650, 28, hWnd, (HMENU)IDC_LBL_AUDIO_HINT, 0, 0);
+      CreateWindowW(L"BUTTON", L"", stChk, 170, 480, 500, 32, hWnd, (HMENU)IDC_CUBEMAP, 0, 0);
+      CreateWindowW(L"STATIC", L"", stMulti, 16, 516, 650, 28, hWnd, (HMENU)IDC_LBL_CUBEMAP_HINT, 0, 0);
 
-      HWND autoBtn = CreateWindowW(L"BUTTON", L"", st | BS_MULTILINE, 24, 720, 710, 44, hWnd, (HMENU)IDC_AUTOFILL, 0, 0);
+      HWND autoBtn = CreateWindowW(L"BUTTON", L"", st | BS_MULTILINE, 16, 552, 650, 34, hWnd, (HMENU)IDC_AUTOFILL, 0, 0);
       SetWindowTheme(autoBtn, L"", L"");
-      CreateWindowW(L"STATIC", L"", stMulti, 24, 770, 710, 40, hWnd, (HMENU)IDC_AUTOFILL_STATUS, 0, 0);
+      CreateWindowW(L"STATIC", L"", stMulti, 16, 590, 650, 30, hWnd, (HMENU)IDC_AUTOFILL_STATUS, 0, 0);
 
-      CreateWindowW(L"BUTTON", L"", st, 24, 822, 220, 40, hWnd, (HMENU)IDC_START, 0, 0);
-      CreateWindowW(L"BUTTON", L"", st, 260, 822, 230, 40, hWnd, (HMENU)IDC_CAPTURE, 0, 0);
-      CreateWindowW(L"BUTTON", L"", st, 510, 822, 224, 40, hWnd, (HMENU)IDC_CANCEL, 0, 0);
+      CreateWindowW(L"BUTTON", L"", st, 16, 628, 200, 32, hWnd, (HMENU)IDC_START, 0, 0);
+      CreateWindowW(L"BUTTON", L"", st, 230, 628, 210, 32, hWnd, (HMENU)IDC_CAPTURE, 0, 0);
+      CreateWindowW(L"BUTTON", L"", st, 454, 628, 212, 32, hWnd, (HMENU)IDC_CANCEL, 0, 0);
 
-      CreateWindowW(L"STATIC", L"", stMulti, 24, 876, 710, 36, hWnd, (HMENU)IDC_LBL_HINT, 0, 0);
-      CreateWindowW(L"STATIC", L"", stMulti, 24, 916, 710, 36, hWnd, (HMENU)IDC_LBL_RESNOTE, 0, 0);
-      CreateWindowW(L"STATIC", L"", st, 24, 960, 150, 20, hWnd, (HMENU)IDC_ISSUES_LEAD, 0, 0);
-      CreateWindowW(WC_LINK, L"", st, 180, 960, 240, 20, hWnd, (HMENU)IDC_ISSUES_LINK, 0, 0);
-      CreateWindowW(L"STATIC", L"", stMulti, 24, 988, 710, 36, hWnd, (HMENU)IDC_LBL_SPEC, 0, 0);
-      CreateWindowW(L"STATIC", L"", st, 24, 1028, 710, 20, hWnd, (HMENU)IDC_LBL_PR, 0, 0);
-      CreateWindowW(L"STATIC", L"", stMulti, 24, 1052, 710, 40, hWnd, (HMENU)IDC_LBL_SAVE_WARN, 0, 0);
+      CreateWindowW(L"STATIC", L"", stMulti, 16, 670, 650, 28, hWnd, (HMENU)IDC_LBL_HINT, 0, 0);
+      CreateWindowW(L"STATIC", L"", stMulti, 16, 700, 650, 28, hWnd, (HMENU)IDC_LBL_RESNOTE, 0, 0);
+      CreateWindowW(L"STATIC", L"", st, 16, 734, 130, 16, hWnd, (HMENU)IDC_ISSUES_LEAD, 0, 0);
+      CreateWindowW(WC_LINK, L"", st, 150, 734, 200, 16, hWnd, (HMENU)IDC_ISSUES_LINK, 0, 0);
+      CreateWindowW(L"STATIC", L"", stMulti, 16, 756, 650, 28, hWnd, (HMENU)IDC_LBL_SPEC, 0, 0);
+      CreateWindowW(L"STATIC", L"", st, 16, 788, 650, 16, hWnd, (HMENU)IDC_LBL_PR, 0, 0);
+      CreateWindowW(L"STATIC", L"", stMulti, 16, 808, 650, 32, hWnd, (HMENU)IDC_LBL_SAVE_WARN, 0, 0);
 
       DlgProc(hWnd, WM_INITDIALOG, 0, 0);
-      ui_layout::FitClientSize(hWnd, 760, 1100);
+      ui_layout::FitClientSize(hWnd, 700, 850);
       return 0;
     }
     if (m == WM_NOTIFY) {
@@ -560,7 +585,14 @@ bool ShowRenderDialog(HWND owner, RenderSettings& settings) {
       }
     }
     if (m == WM_CLOSE) { g_ok = false; DestroyWindow(hWnd); return 0; }
-    if (m == WM_DESTROY) { PostQuitMessage(0); return 0; }
+    if (m == WM_DESTROY) {
+      if (g_uiFont) {
+        DeleteObject(g_uiFont);
+        g_uiFont = nullptr;
+      }
+      PostQuitMessage(0);
+      return 0;
+    }
     return DefWindowProcW(hWnd, m, w, l);
   };
   wc.hInstance = GetModuleHandleW(nullptr);
