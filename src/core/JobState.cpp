@@ -111,7 +111,7 @@ bool JobState::load(const std::wstring& path, JobStateData& out) {
     out.settings.ipdUnits = (float)s.value("ipdUnits", 2.0);
     out.settings.outputDir = widen(s.value("outputDir", std::string{}));
     out.settings.encodeVideo = s.value("encodeVideo", true);
-    out.settings.encodeCodec = (EncodeCodec)s.value("encodeCodec", (int)EncodeCodec::Libx264);
+    out.settings.encodeCodec = (EncodeCodec)s.value("encodeCodec", (int)EncodeCodec::Auto);
     out.settings.cubemapFaces = s.value("cubemapFaces", false);
     out.settings.audioPath = widen(s.value("audioPath", std::string{}));
     out.settings.jobName = widen(s.value("jobName", std::string{"mmdvr_job"}));

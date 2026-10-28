@@ -56,7 +56,10 @@ void PluginHost::onDeviceCreated(IDirect3DDevice9* device) {
   capture_.setDevice(device);
   controller_.setCapture(std::shared_ptr<IFrameCapture>(&capture_, [](IFrameCapture*){}));
   controller_.setRedraw(std::shared_ptr<IRedrawRequest>(this, [](IRedrawRequest*){}));
-  controller_.setAbortHandler([this]() { releaseRenderSession("abortHandler"); });
+  // Cancel comes from the progress dialog UI thread — only wake waiters here.
+  // Camera restore / pool release run on the job worker via cleanupHandler.
+  controller_.setAbortHandler([this]() { interruptCaptureWait("abortHandler"); });
+  controller_.setCleanupHandler([this]() { releaseRenderSession("jobCleanup"); });
   applyCaptureIsolateFromEnv();
   refreshBackbufferSize();
   Diagnostics::instance().setLogPath(moduleDir() + L"\\mmd_vr_renderer.log");
@@ -97,7 +100,7 @@ void PluginHost::restoreObservedTransforms(IDirect3DDevice9* device) {
   device->SetTransform(D3DTS_PROJECTION, &proj);
 }
 
-void PluginHost::releaseRenderSession(const char* reason) {
+void PluginHost::interruptCaptureWait(const char* reason) {
   {
     std::lock_guard<std::mutex> lock(redrawMu_);
     wantCapture_ = false;
@@ -106,6 +109,13 @@ void PluginHost::releaseRenderSession(const char* reason) {
     captureReady_ = true; // unblock waiters (empty pending → treat as fail)
     redrawCv_.notify_all();
   }
+  char buf[160];
+  std::snprintf(buf, sizeof(buf), "interruptCaptureWait(%s)", reason ? reason : "?");
+  Diagnostics::instance().info(buf);
+}
+
+void PluginHost::releaseRenderSession(const char* reason) {
+  interruptCaptureWait(reason);
   const bool hadTransformOverride =
       controller_.camera().overrideActive() || IsTransformOverrideEnabled();
   controller_.camera().endOverride();
@@ -411,9 +421,10 @@ bool PluginHost::captureView(ImageBuffer& out) {
   }
   wantCapture_ = false;
   skipCaptures_ = 0;
+  lock.unlock();
   capture_.setSquareCrop(true);
   if (controller_.isCancelled()) {
-    releaseRenderSession("captureView-cancel");
+    Diagnostics::instance().info("captureView: cancelled");
     return false;
   }
   if (ok) {
@@ -423,7 +434,6 @@ bool PluginHost::captureView(ImageBuffer& out) {
   Diagnostics::instance().error(
       "captureView timed out waiting for Present "
       "(MMD may be paused / not redrawing).");
-  releaseRenderSession("captureView-timeout");
   return false;
 }
 
@@ -454,6 +464,13 @@ bool PluginHost::renderView(const CameraState& cam, ImageBuffer& out) {
     pendingCam_ = cam;
   }
 
+  if (controller_.isCancelled()) {
+    std::lock_guard<std::mutex> lock(redrawMu_);
+    wantCapture_ = false;
+    skipCaptures_ = 0;
+    return false;
+  }
+
   if (!timeline_.applyCameraFace(nativeCameraBase_, cam)) {
     std::lock_guard<std::mutex> lock(redrawMu_);
     wantCapture_ = false;
@@ -461,10 +478,22 @@ bool PluginHost::renderView(const CameraState& cam, ImageBuffer& out) {
     Diagnostics::instance().error("renderView: failed to apply native MMD camera face");
     return false;
   }
-  // applyCameraFace selects camera mode and draws the red look-at ◎ into the
-  // 3D view. Leave that mode (and bone markers) before Present is sampled.
+  if (controller_.isCancelled()) {
+    std::lock_guard<std::mutex> lock(redrawMu_);
+    wantCapture_ = false;
+    skipCaptures_ = 0;
+    return false;
+  }
+  // Keep the camera target selected so MMD applies this face's native controls;
+  // temporarily hide viewport information (including the red look-at ◎).
   timeline_.suppressViewportOverlays();
   nativeCameraApplied_ = true;
+  if (controller_.isCancelled()) {
+    std::lock_guard<std::mutex> lock(redrawMu_);
+    wantCapture_ = false;
+    skipCaptures_ = 0;
+    return false;
+  }
   char armed[128];
   std::snprintf(armed, sizeof(armed), "renderView: native face=%d halfIpd=%.3f armed (skip=1)",
                 static_cast<int>(cam.cubeFace), cam.nativeEyeOffsetX);
@@ -485,26 +514,21 @@ bool PluginHost::renderView(const CameraState& cam, ImageBuffer& out) {
     if (ok) break;
   }
 
-  auto finish = [&](bool success) {
-    wantCapture_ = false;
-    skipCaptures_ = 0;
-    return success;
-  };
-
+  wantCapture_ = false;
+  skipCaptures_ = 0;
   if (controller_.isCancelled()) {
-    releaseRenderSession("renderView-cancel");
+    Diagnostics::instance().info("renderView: cancelled");
     return false;
   }
   if (ok) {
     out = std::move(pendingCapture_);
     Diagnostics::instance().info(out.empty() ? "renderView: empty capture" : "renderView: face ok");
-    return finish(!out.empty());
+    return !out.empty();
   }
 
   Diagnostics::instance().error(
       "renderView timed out waiting for Present with native MMD camera "
       "(MMD may be paused / not redrawing). Face skipped.");
-  releaseRenderSession("renderView-timeout");
   return false;
 }
 

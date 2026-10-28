@@ -24,12 +24,12 @@ enum class QualityPreset : int {
   Fast = 2
 };
 
-// MP4 encoder for FFmpeg. Default stays software x264 (same as before).
+// MP4 encoder for FFmpeg. Default is Auto (hardware H.264 when available).
 // Auto / NVENC / QSV / AMF use hardware encoders when FFmpeg (and the GPU driver) expose them
 // — same family MMD EquirectangularX post-process bats often use (h264_nvenc).
 enum class EncodeCodec : int {
-  Libx264 = 0, // default
-  Auto = 1,    // prefer NVENC → QSV → AMF → libx264
+  Libx264 = 0,
+  Auto = 1,    // default: prefer NVENC → QSV → AMF → libx264
   Nvenc = 2,
   Qsv = 3,
   Amf = 4
@@ -144,7 +144,7 @@ struct RenderSettings {
   // Optional: mux this audio into the MP4 (MMD-loaded WAV path, or manual browse).
   std::wstring audioPath;
   bool encodeVideo = true;
-  EncodeCodec encodeCodec = EncodeCodec::Libx264; // keep classic ffmpeg x264 as default
+  EncodeCodec encodeCodec = EncodeCodec::Auto; // HW H.264 (NVENC/QSV/AMF) when FFmpeg has it
   // true (default): multi-face 90° cameras → equirect (real VR180/360 FOV).
   // false: live MMD camera only (no VR FOV; ray-mmd fallback if cubemap misbehaves).
   bool cubemapFaces = true;

@@ -38,8 +38,10 @@ public:
 
   void setCapture(std::shared_ptr<IFrameCapture> capture);
   void setRedraw(std::shared_ptr<IRedrawRequest> redraw);
-  // Invoked from cancel() / job end so the plugin can drop hooks & restore D3D state.
+  // cancel(): wake capture waits only (must be UI-thread safe — no MMD UI writes).
   void setAbortHandler(std::function<void()> fn);
+  // start() end: restore camera / release capture pool on the job worker thread.
+  void setCleanupHandler(std::function<void()> fn);
   CameraController& camera() { return camera_; }
 
   void setSettings(const RenderSettings& s);
@@ -80,6 +82,7 @@ private:
   std::shared_ptr<IRedrawRequest> redraw_;
   ProgressCallback progressCb_;
   std::function<void()> abortHandler_;
+  std::function<void()> cleanupHandler_;
   JobProgress progress_{};
   void waitIfPaused();
   void updateTimingLocked(int completedCount);

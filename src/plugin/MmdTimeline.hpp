@@ -43,25 +43,26 @@ public:
   // native eye by moving that center as each cubemap direction is applied.
   bool applyCameraFace(const MmdCameraUiState& base, const CameraState& desired);
 
-  // Writing camera edits selects カメラ･照明･アクセサリ and draws the red ◎
-  // look-at marker into the viewport. Switch to a model target and leave bone
-  // "選択" off so Present captures a clean frame. Call after applyCameraFace.
+  // Hide MMD viewport information overlays (including the camera target ◎)
+  // while retaining the camera edit target. Call after applyCameraFace.
   bool suppressViewportOverlays();
-  // Restore the edit-target combo saved by the first suppressViewportOverlays.
+  // Restore MMD viewport-overlay state saved by suppressViewportOverlays.
   void restoreEditTarget();
 
 private:
   HWND mmdMain_ = nullptr;
   HWND frameEdit_ = nullptr;
   std::array<HWND, 7> cameraEdits_{};
-  int savedEditTarget_ = -1;
-  bool editTargetSaved_ = false;
+  bool informationDisplaySaved_ = false;
+  bool informationDisplayWasEnabled_ = false;
 
   static bool isDigitText(const std::wstring& s);
   static BOOL CALLBACK enumFindFrameEdit(HWND hwnd, LPARAM lp);
   static BOOL CALLBACK enumFindCameraEdit(HWND hwnd, LPARAM lp);
-  static HWND findChildById(HWND root, int id);
   bool bindCameraEdits();
+  bool isInformationDisplayEnabled() const;
+  void ensureInformationDisplayDisabled();
+  void restoreInformationDisplay();
   static bool readDouble(HWND edit, double& out);
   static bool writeDouble(HWND edit, double value);
   static void notifyEditChanged(HWND edit);

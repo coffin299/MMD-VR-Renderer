@@ -42,8 +42,9 @@ public:
   bool seekAnimationFrame(int frameIndex) override;
   void restoreSceneCamera() override;
 
-  // Cancel / job end: drop capture request, disable SetTransform override,
-  // restore last observed VIEW/PROJ onto the device, release capture pool.
+  // UI-thread safe: drop capture request and wake renderView waiters only.
+  void interruptCaptureWait(const char* reason);
+  // Job-worker / device-reset: restore MMD camera, drop hooks, release pool.
   void releaseRenderSession(const char* reason);
 
   std::wstring moduleDir() const;

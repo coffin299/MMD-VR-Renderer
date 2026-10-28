@@ -36,7 +36,7 @@ public:
       const std::wstring& outMp4,
       double fps,
       const std::wstring& ffmpegPath,
-      EncodeCodec codec = EncodeCodec::Libx264,
+      EncodeCodec codec = EncodeCodec::Auto,
       const std::wstring& audioPath = {},
       double audioStartSec = 0.0,
       std::wstring* errorOut = nullptr);

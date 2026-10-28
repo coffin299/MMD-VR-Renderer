@@ -148,7 +148,8 @@ CameraState makeCubeFaceCamera(const Vec3& eye, const Vec3& forward, const Vec3&
 CameraState offsetCameraForEye(const CameraState& base, float ipdUnits, bool leftEye) {
   CameraState c = base;
   Vec3 forward = normalize(sub(base.target, base.eye));
-  Vec3 right = normalize(cross(forward, base.up));
+  // Screen-right = up × forward (matches native MMD stereo; not forward × up).
+  Vec3 right = normalize(cross(base.up, forward));
   float sign = leftEye ? -0.5f : 0.5f;
   Vec3 offset = scale(right, ipdUnits * sign);
   c.eye = add(base.eye, offset);

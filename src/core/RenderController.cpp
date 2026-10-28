@@ -24,6 +24,7 @@ RenderController::RenderController() = default;
 void RenderController::setCapture(std::shared_ptr<IFrameCapture> capture) { capture_ = std::move(capture); }
 void RenderController::setRedraw(std::shared_ptr<IRedrawRequest> redraw) { redraw_ = std::move(redraw); }
 void RenderController::setAbortHandler(std::function<void()> fn) { abortHandler_ = std::move(fn); }
+void RenderController::setCleanupHandler(std::function<void()> fn) { cleanupHandler_ = std::move(fn); }
 
 void RenderController::applyQualityDefaults(RenderSettings& s) {
   // Resolution presets are 2:1 YouTube VR sizes. Face size is user-owned (0 = auto).
@@ -503,7 +504,8 @@ bool RenderController::start(ProgressCallback cb) {
     asyncWriter_.reset();
   }
   Parallel::setCancelFlag(nullptr);
-  if (abortHandler_) abortHandler_();
+  // Full teardown on the job worker only — never from the progress-dialog UI thread.
+  if (cleanupHandler_) cleanupHandler_();
 
   JobStateData js;
   js.settings = s;

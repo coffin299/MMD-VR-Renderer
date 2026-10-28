@@ -98,14 +98,23 @@ static void refillCombo(HWND hDlg, int id, const wchar_t* const* items, int coun
 constexpr int kFaceSizePresets[] = {0, 512, 1024, 1536, 2048, 3072, 4096};
 constexpr int kFaceSizePresetCount =
     static_cast<int>(sizeof(kFaceSizePresets) / sizeof(kFaceSizePresets[0]));
+constexpr int kWriteThreadPresets[] = {1, 2, 3, 4, 6, 8};
+constexpr int kWriteThreadPresetCount =
+    static_cast<int>(sizeof(kWriteThreadPresets) / sizeof(kWriteThreadPresets[0]));
+// 0 = unlimited pending frames in RAM.
+constexpr int kWriteQueuePresets[] = {0, 1, 2, 3, 4, 6, 8};
+constexpr int kWriteQueuePresetCount =
+    static_cast<int>(sizeof(kWriteQueuePresets) / sizeof(kWriteQueuePresets[0]));
 
-static int faceSizeToComboIndex(int faceSize) {
-  if (faceSize <= 0) return 0;
-  int best = 1;
-  int bestDist = abs(kFaceSizePresets[1] - faceSize);
-  for (int i = 1; i < kFaceSizePresetCount; ++i) {
-    if (kFaceSizePresets[i] == faceSize) return i;
-    const int d = abs(kFaceSizePresets[i] - faceSize);
+static int presetToComboIndex(const int* presets, int count, int value, int zeroIndex = 0) {
+  if (value <= 0 && zeroIndex >= 0) return zeroIndex;
+  int best = (zeroIndex == 0 && count > 1) ? 1 : 0;
+  int bestDist = 0x7fffffff;
+  for (int i = 0; i < count; ++i) {
+    if (presets[i] == value) return i;
+    if (presets[i] <= 0 && value <= 0) return i;
+    if (presets[i] <= 0) continue;
+    const int d = abs(presets[i] - value);
     if (d < bestDist) {
       bestDist = d;
       best = i;
@@ -114,9 +123,29 @@ static int faceSizeToComboIndex(int faceSize) {
   return best;
 }
 
+static int comboIndexToPreset(const int* presets, int count, int idx, int fallback) {
+  if (idx < 0 || idx >= count) return fallback;
+  return presets[idx];
+}
+
+static int faceSizeToComboIndex(int faceSize) {
+  return presetToComboIndex(kFaceSizePresets, kFaceSizePresetCount, faceSize, 0);
+}
 static int comboIndexToFaceSize(int idx) {
-  if (idx < 0 || idx >= kFaceSizePresetCount) return 0;
-  return kFaceSizePresets[idx];
+  return comboIndexToPreset(kFaceSizePresets, kFaceSizePresetCount, idx, 0);
+}
+static int writeThreadsToComboIndex(int n) {
+  return presetToComboIndex(kWriteThreadPresets, kWriteThreadPresetCount, n < 1 ? 1 : n, -1);
+}
+static int comboIndexToWriteThreads(int idx) {
+  const int v = comboIndexToPreset(kWriteThreadPresets, kWriteThreadPresetCount, idx, 2);
+  return v < 1 ? 1 : v;
+}
+static int writeQueueToComboIndex(int n) {
+  return presetToComboIndex(kWriteQueuePresets, kWriteQueuePresetCount, n, 0);
+}
+static int comboIndexToWriteQueue(int idx) {
+  return comboIndexToPreset(kWriteQueuePresets, kWriteQueuePresetCount, idx, 0);
 }
 
 static void refillFaceCombo(HWND hDlg, int faceSize) {
@@ -132,6 +161,33 @@ static void refillFaceCombo(HWND hDlg, int faceSize) {
     }
   }
   SendDlgItemMessageW(hDlg, IDC_FACE, CB_SETCURSEL, faceSizeToComboIndex(faceSize), 0);
+}
+
+static void refillWriteThreadsCombo(HWND hDlg, int writeThreads) {
+  SendDlgItemMessageW(hDlg, IDC_WRITE_THREADS, CB_RESETCONTENT, 0, 0);
+  for (int i = 0; i < kWriteThreadPresetCount; ++i) {
+    wchar_t buf[16];
+    swprintf(buf, 16, L"%d", kWriteThreadPresets[i]);
+    SendDlgItemMessageW(hDlg, IDC_WRITE_THREADS, CB_ADDSTRING, 0, (LPARAM)buf);
+  }
+  SendDlgItemMessageW(
+      hDlg, IDC_WRITE_THREADS, CB_SETCURSEL, writeThreadsToComboIndex(writeThreads), 0);
+}
+
+static void refillWriteQueueCombo(HWND hDlg, int writeQueueMax) {
+  const auto& s = ui::t();
+  SendDlgItemMessageW(hDlg, IDC_WRITE_QUEUE, CB_RESETCONTENT, 0, 0);
+  for (int i = 0; i < kWriteQueuePresetCount; ++i) {
+    if (kWriteQueuePresets[i] <= 0) {
+      SendDlgItemMessageW(hDlg, IDC_WRITE_QUEUE, CB_ADDSTRING, 0, (LPARAM)s.comboQueueUnlimited);
+    } else {
+      wchar_t buf[16];
+      swprintf(buf, 16, L"%d", kWriteQueuePresets[i]);
+      SendDlgItemMessageW(hDlg, IDC_WRITE_QUEUE, CB_ADDSTRING, 0, (LPARAM)buf);
+    }
+  }
+  SendDlgItemMessageW(
+      hDlg, IDC_WRITE_QUEUE, CB_SETCURSEL, writeQueueToComboIndex(writeQueueMax), 0);
 }
 
 static void updateSizeInfo(HWND hDlg) {
@@ -205,6 +261,10 @@ static void applyLabels(HWND hDlg) {
   refillCombo(hDlg, IDC_ENCODE_CODEC, codecItems, 5, codecSel < 0 ? 0 : codecSel);
   const int faceSel = (int)SendDlgItemMessageW(hDlg, IDC_FACE, CB_GETCURSEL, 0, 0);
   refillFaceCombo(hDlg, comboIndexToFaceSize(faceSel));
+  const int writeSel = (int)SendDlgItemMessageW(hDlg, IDC_WRITE_THREADS, CB_GETCURSEL, 0, 0);
+  refillWriteThreadsCombo(hDlg, comboIndexToWriteThreads(writeSel));
+  const int queueSel = (int)SendDlgItemMessageW(hDlg, IDC_WRITE_QUEUE, CB_GETCURSEL, 0, 0);
+  refillWriteQueueCombo(hDlg, comboIndexToWriteQueue(queueSel));
   updateSizeInfo(hDlg);
 }
 
@@ -215,8 +275,10 @@ static void applyHwSuggestToUi(HWND hDlg) {
   setText(hDlg, IDC_FPS, std::to_wstring((int)sug.fps));
   setText(hDlg, IDC_THREADS, std::to_wstring(sug.workerThreads));
   SendDlgItemMessageW(hDlg, IDC_FACE, CB_SETCURSEL, faceSizeToComboIndex(sug.faceSize), 0);
-  setText(hDlg, IDC_WRITE_THREADS, std::to_wstring(sug.writeThreads));
-  setText(hDlg, IDC_WRITE_QUEUE, std::to_wstring(sug.writeQueueMax));
+  SendDlgItemMessageW(
+      hDlg, IDC_WRITE_THREADS, CB_SETCURSEL, writeThreadsToComboIndex(sug.writeThreads), 0);
+  SendDlgItemMessageW(
+      hDlg, IDC_WRITE_QUEUE, CB_SETCURSEL, writeQueueToComboIndex(sug.writeQueueMax), 0);
   updateSizeInfo(hDlg);
   setText(hDlg, IDC_AUTOFILL_STATUS, sug.summary);
 }
@@ -238,8 +300,8 @@ static INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM) {
     setText(hDlg, IDC_FPS, std::to_wstring((int)s.fps));
     setText(hDlg, IDC_THREADS, std::to_wstring(s.workerThreads));
     refillFaceCombo(hDlg, s.faceSize);
-    setText(hDlg, IDC_WRITE_THREADS, std::to_wstring(s.writeThreads));
-    setText(hDlg, IDC_WRITE_QUEUE, std::to_wstring(s.writeQueueMax));
+    refillWriteThreadsCombo(hDlg, s.writeThreads);
+    refillWriteQueueCombo(hDlg, s.writeQueueMax);
     setText(hDlg, IDC_IPD, std::to_wstring(s.ipdUnits));
     setText(hDlg, IDC_FSTART, std::to_wstring(s.frameStart));
     setText(hDlg, IDC_FEND, std::to_wstring(s.frameEnd < 0 ? s.frameStart : s.frameEnd));
@@ -315,10 +377,10 @@ static INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM) {
       if (s.workerThreads < 0) s.workerThreads = 0;
       s.faceSize = comboIndexToFaceSize(
           (int)SendDlgItemMessageW(hDlg, IDC_FACE, CB_GETCURSEL, 0, 0));
-      s.writeThreads = _wtoi(getText(hDlg, IDC_WRITE_THREADS).c_str());
-      if (s.writeThreads < 1) s.writeThreads = 1;
-      s.writeQueueMax = _wtoi(getText(hDlg, IDC_WRITE_QUEUE).c_str());
-      if (s.writeQueueMax < 0) s.writeQueueMax = 0;
+      s.writeThreads = comboIndexToWriteThreads(
+          (int)SendDlgItemMessageW(hDlg, IDC_WRITE_THREADS, CB_GETCURSEL, 0, 0));
+      s.writeQueueMax = comboIndexToWriteQueue(
+          (int)SendDlgItemMessageW(hDlg, IDC_WRITE_QUEUE, CB_GETCURSEL, 0, 0));
       s.ipdUnits = (float)_wtof(getText(hDlg, IDC_IPD).c_str());
       s.frameStart = _wtoi(getText(hDlg, IDC_FSTART).c_str());
       s.frameEnd = _wtoi(getText(hDlg, IDC_FEND).c_str());
@@ -327,8 +389,8 @@ static INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM) {
       s.audioPath = getText(hDlg, IDC_AUDIO);
       s.cubemapFaces = IsDlgButtonChecked(hDlg, IDC_CUBEMAP) == BST_CHECKED;
       int codecIdx = (int)SendDlgItemMessageW(hDlg, IDC_ENCODE_CODEC, CB_GETCURSEL, 0, 0);
-      if (codecIdx < 0) codecIdx = (int)EncodeCodec::Libx264;
-      if (codecIdx > (int)EncodeCodec::Amf) codecIdx = (int)EncodeCodec::Libx264;
+      if (codecIdx < 0 || codecIdx > (int)EncodeCodec::Amf)
+        codecIdx = (int)EncodeCodec::Auto;
       s.encodeCodec = (EncodeCodec)codecIdx;
       s.jobName = L"mmdvr_job";
       g_ok = true;
@@ -408,11 +470,11 @@ bool ShowRenderDialog(HWND owner, RenderSettings& settings) {
       CreateWindowW(L"STATIC", L"", st, 428, 180, 90, 20, hWnd, (HMENU)IDC_LBL_THREADS_HINT, 0, 0);
 
       CreateWindowW(L"STATIC", L"", st, 20, 208, 150, 20, hWnd, (HMENU)IDC_LBL_FACE, 0, 0);
-      CreateWindowW(L"COMBOBOX", L"", st | CBS_DROPDOWNLIST, 180, 206, 200, 200, hWnd, (HMENU)IDC_FACE, 0, 0);
-      CreateWindowW(L"STATIC", L"", st, 390, 208, 70, 20, hWnd, (HMENU)IDC_LBL_WRITE, 0, 0);
-      CreateWindowW(L"EDIT", L"", st | WS_BORDER, 465, 206, 45, 22, hWnd, (HMENU)IDC_WRITE_THREADS, 0, 0);
-      CreateWindowW(L"STATIC", L"", st, 520, 208, 70, 20, hWnd, (HMENU)IDC_LBL_QUEUE, 0, 0);
-      CreateWindowW(L"EDIT", L"", st | WS_BORDER, 595, 206, 40, 22, hWnd, (HMENU)IDC_WRITE_QUEUE, 0, 0);
+      CreateWindowW(L"COMBOBOX", L"", st | CBS_DROPDOWNLIST, 180, 206, 160, 200, hWnd, (HMENU)IDC_FACE, 0, 0);
+      CreateWindowW(L"STATIC", L"", st, 350, 208, 70, 20, hWnd, (HMENU)IDC_LBL_WRITE, 0, 0);
+      CreateWindowW(L"COMBOBOX", L"", st | CBS_DROPDOWNLIST, 425, 206, 60, 200, hWnd, (HMENU)IDC_WRITE_THREADS, 0, 0);
+      CreateWindowW(L"STATIC", L"", st, 495, 208, 55, 20, hWnd, (HMENU)IDC_LBL_QUEUE, 0, 0);
+      CreateWindowW(L"COMBOBOX", L"", st | CBS_DROPDOWNLIST, 555, 206, 90, 200, hWnd, (HMENU)IDC_WRITE_QUEUE, 0, 0);
       CreateWindowW(L"STATIC", L"", stMulti, 20, 232, 620, 20, hWnd, (HMENU)IDC_LBL_FACE_HINT, 0, 0);
 
       CreateWindowW(L"STATIC", L"", st, 20, 258, 150, 20, hWnd, (HMENU)IDC_LBL_IPD, 0, 0);

@@ -13,11 +13,8 @@ namespace {
 constexpr std::array<int, 7> kCameraEditIds = {
     544, 545, 546, 547, 548, 549, 550}; // X/Y/Z, Rx/Ry/Rz, distance (MMD 9.32 x64)
 
-// MMD 9.32 x64 viewport-overlay controls (Present includes these when active).
-constexpr int kEditTargetComboId = 436;   // カメラ･照明･アクセサリ | models...
-constexpr int kModelEditButtonId = 536;   // モデル編 / カメラ編
-constexpr int kBoneSelectButtonId = 490;  // 選択 — toggles bone ○/□ markers
-constexpr int kAxisButtonId = 557;        // 座標軸
+// 表示(&V) > 情報表示(&D). This also controls the camera target ◎ overlay.
+constexpr int kInformationDisplayMenuId = 211;
 
 struct FindCtx {
   HWND best = nullptr;
@@ -260,116 +257,58 @@ bool MmdTimeline::applyCamera(const MmdCameraUiState& state) {
   return true;
 }
 
-HWND MmdTimeline::findChildById(HWND root, int id) {
-  if (!root || !IsWindow(root) || id == 0) return nullptr;
-  struct Ctx { int id; HWND found; };
-  Ctx ctx{id, nullptr};
-  EnumChildWindows(
-      root,
-      [](HWND hwnd, LPARAM lp) -> BOOL {
-        auto* c = reinterpret_cast<Ctx*>(lp);
-        if (GetDlgCtrlID(hwnd) == c->id) {
-          c->found = hwnd;
-          return FALSE;
-        }
-        return TRUE;
-      },
-      reinterpret_cast<LPARAM>(&ctx));
-  return ctx.found;
+bool MmdTimeline::isInformationDisplayEnabled() const {
+  if (!mmdMain_ || !IsWindow(mmdMain_)) return false;
+  HMENU root = GetMenu(mmdMain_);
+  if (!root) return false;
+  const int topCount = GetMenuItemCount(root);
+  for (int i = 0; i < topCount; ++i) {
+    HMENU sub = GetSubMenu(root, i);
+    if (!sub) continue;
+    const UINT st = GetMenuState(sub, static_cast<UINT>(kInformationDisplayMenuId), MF_BYCOMMAND);
+    if (st == static_cast<UINT>(-1)) continue;
+    return (st & MF_CHECKED) != 0;
+  }
+  return false;
+}
+
+void MmdTimeline::ensureInformationDisplayDisabled() {
+  if (!informationDisplaySaved_) {
+    informationDisplayWasEnabled_ = isInformationDisplayEnabled();
+    informationDisplaySaved_ = true;
+  }
+  if (isInformationDisplayEnabled()) {
+    SendMessageW(mmdMain_, WM_COMMAND, static_cast<WPARAM>(kInformationDisplayMenuId), 0);
+    Diagnostics::instance().info("MmdTimeline: disabled 情報表示 for cubemap capture");
+  }
+}
+
+void MmdTimeline::restoreInformationDisplay() {
+  if (!informationDisplaySaved_) return;
+  const bool want = informationDisplayWasEnabled_;
+  informationDisplaySaved_ = false;
+  informationDisplayWasEnabled_ = false;
+  if (!mmdMain_ || !IsWindow(mmdMain_)) return;
+  if (want != isInformationDisplayEnabled()) {
+    SendMessageW(mmdMain_, WM_COMMAND, static_cast<WPARAM>(kInformationDisplayMenuId), 0);
+    Diagnostics::instance().info("MmdTimeline: restored 情報表示");
+  }
 }
 
 bool MmdTimeline::suppressViewportOverlays() {
   if (!mmdMain_ || !IsWindow(mmdMain_)) return false;
-
-  HWND combo = findChildById(mmdMain_, kEditTargetComboId);
-  if (!combo) {
-    Diagnostics::instance().warn(
-        "MmdTimeline: edit-target combo not found; camera ◎ may remain in capture");
-    return false;
-  }
-
-  const int count = static_cast<int>(SendMessageW(combo, CB_GETCOUNT, 0, 0));
-  const int sel = static_cast<int>(SendMessageW(combo, CB_GETCURSEL, 0, 0));
-  if (!editTargetSaved_) {
-    savedEditTarget_ = sel;
-    editTargetSaved_ = true;
-  }
-
-  auto notifyCombo = [&](HWND cb) {
-    HWND parent = GetParent(cb);
-    const WPARAM wp = MAKEWPARAM(kEditTargetComboId, CBN_SELCHANGE);
-    if (parent) SendMessageW(parent, WM_COMMAND, wp, reinterpret_cast<LPARAM>(cb));
-    SendMessageW(mmdMain_, WM_COMMAND, wp, reinterpret_cast<LPARAM>(cb));
-  };
-
-  // Index 0 is カメラ･照明･アクセサリ — that mode draws the red look-at ◎.
-  if (count > 1 && sel <= 0) {
-    SendMessageW(combo, CB_SETCURSEL, 1, 0);
-    notifyCombo(combo);
-  }
-
-  // If the panel toggle still says モデル編, click it to leave camera mode.
-  if (HWND modelBtn = findChildById(mmdMain_, kModelEditButtonId)) {
-    if (IsWindowVisible(modelBtn)) {
-      wchar_t text[64]{};
-      GetWindowTextW(modelBtn, text, static_cast<int>(std::size(text)));
-      if (wcsstr(text, L"モデル") || wcsstr(text, L"Model")) {
-        SendMessageW(modelBtn, BM_CLICK, 0, 0);
-      }
-    }
-  }
-
-  Sleep(35);
-
-  // Bone ○ markers appear in model mode while 選択 is latched on.
-  if (HWND selectBtn = findChildById(mmdMain_, kBoneSelectButtonId)) {
-    if (IsWindowVisible(selectBtn)) {
-      const LRESULT st = SendMessageW(selectBtn, BM_GETSTATE, 0, 0);
-      if (st & BST_CHECKED) {
-        SendMessageW(selectBtn, BM_CLICK, 0, 0);
-      }
-    }
-  }
-
-  // Hide world axes if the toolbar button is latched on.
-  if (HWND axisBtn = findChildById(mmdMain_, kAxisButtonId)) {
-    if (IsWindowVisible(axisBtn)) {
-      const LRESULT st = SendMessageW(axisBtn, BM_GETSTATE, 0, 0);
-      if (st & BST_CHECKED) {
-        SendMessageW(axisBtn, BM_CLICK, 0, 0);
-      }
-    }
-  }
-
+  // Do not switch the target combo to a model: MMD stops applying the camera
+  // controls while the model target is active, so every following face remains
+  // at the last front-camera render. The information-display menu hides ◎
+  // without changing which controls own the scene camera.
+  ensureInformationDisplayDisabled();
   Sleep(20);
   Diagnostics::instance().info("MmdTimeline: viewport overlays suppressed for capture");
   return true;
 }
 
 void MmdTimeline::restoreEditTarget() {
-  if (!editTargetSaved_) return;
-  editTargetSaved_ = false;
-  if (!mmdMain_ || !IsWindow(mmdMain_)) {
-    savedEditTarget_ = -1;
-    return;
-  }
-  HWND combo = findChildById(mmdMain_, kEditTargetComboId);
-  if (!combo || savedEditTarget_ < 0) {
-    savedEditTarget_ = -1;
-    return;
-  }
-  const int count = static_cast<int>(SendMessageW(combo, CB_GETCOUNT, 0, 0));
-  if (savedEditTarget_ >= count) {
-    savedEditTarget_ = -1;
-    return;
-  }
-  SendMessageW(combo, CB_SETCURSEL, savedEditTarget_, 0);
-  HWND parent = GetParent(combo);
-  const WPARAM wp = MAKEWPARAM(kEditTargetComboId, CBN_SELCHANGE);
-  if (parent) SendMessageW(parent, WM_COMMAND, wp, reinterpret_cast<LPARAM>(combo));
-  SendMessageW(mmdMain_, WM_COMMAND, wp, reinterpret_cast<LPARAM>(combo));
-  savedEditTarget_ = -1;
-  Diagnostics::instance().info("MmdTimeline: edit target restored");
+  restoreInformationDisplay();
 }
 
 bool MmdTimeline::applyCameraFace(
@@ -409,11 +348,13 @@ bool MmdTimeline::applyCameraFace(
     double rx = 0.0, ry = 0.0, rz = 0.0;
     if (fl > 1e-8) {
       const double inv = 1.0 / fl;
-      const double nfx = fx * inv, nfy = fy * inv, nfz = fz * inv;
-      // right = forward × worldUp
-      rx = -nfz;
+      const double nfx = fx * inv, nfz = fz * inv;
+      // Screen-right = worldUp × forward. Using forward × up flips L/R when
+      // looking +Z (left eye on +X) and SBS feels inverted / not VR-like.
+      // up=(0,1,0) × forward → (nfz, 0, -nfx); yaw0 look+Z → (+1,0,0).
+      rx = nfz;
       ry = 0.0;
-      rz = nfx;
+      rz = -nfx;
       const double rl = std::sqrt(rx * rx + ry * ry + rz * rz);
       if (rl > 1e-8) {
         rx = (rx / rl) * eyeShift;
@@ -423,6 +364,7 @@ bool MmdTimeline::applyCameraFace(
         // Looking nearly straight up/down: fall back to yaw-horizontal right.
         constexpr double kPi = 3.14159265358979323846;
         const double yaw = base.rotY * kPi / 180.0;
+        // yaw 0 → +X (screen right while looking +Z)
         rx = std::cos(yaw) * eyeShift;
         rz = -std::sin(yaw) * eyeShift;
       }

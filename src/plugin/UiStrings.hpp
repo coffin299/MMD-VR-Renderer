@@ -85,6 +85,7 @@ struct Bundle {
   const wchar_t* comboBalanced;
   const wchar_t* comboFast;
   const wchar_t* comboFaceAuto;
+  const wchar_t* comboQueueUnlimited;
   const wchar_t* browseTitle;
   const wchar_t* sizeStereoFmt; // w,h,w2,h
   const wchar_t* sizeMonoFmt;   // w,h
