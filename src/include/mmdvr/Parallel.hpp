@@ -65,6 +65,10 @@ private:
     std::atomic<int> remaining_{0};
     bool stop_ = false;
 
+    // joinable std::thread dtor calls std::terminate — must join before destroy
+    // (unit-test / process exit paths that never call Parallel::shutdown).
+    ~Pool() { shutdown(); }
+
     void ensureSize(int n) {
       while ((int)threads_.size() < n) {
         const int idx = (int)threads_.size();

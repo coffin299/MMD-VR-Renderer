@@ -31,6 +31,10 @@ GitHub Release Full Changelog → this file on the release tag.
 - JA: 8K 選択時の容量注意（解像度コンボ・サイズ行・注記、日英）
   EN: 8K storage warnings in the resolution combo, size line, and notes (JA+EN)
 
+### 修正 / Fixed
+- JA: **CI の unit test が出力なしで exit 1**: 永続 Parallel プールの joinable スレッドが静的破棄で `std::terminate` していた
+  EN: **CI unit tests exit 1 with no output**: joinable Parallel pool threads called `std::terminate` on static teardown
+
 ### 変更 / Changed
 - JA: 面解像度の注記に VRAM（面RT）＋キャプチャ時の RAM 消費を明記。最適値は16GB級→7680／8GB級→4096
   EN: Face-res note states VRAM (face RTs) + RAM on capture; autofill 7680 on 16GB-class / 4096 on 8GB-class
