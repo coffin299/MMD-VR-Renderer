@@ -4,6 +4,23 @@ on:
   push:
     tags:
       - "v*"
+  # Actions → Release → Run workflow でタグ名を手入力して出せる
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (例: v0.2.0)"
+        required: true
+        type: string
+      prerelease:
+        description: "Pre-release として公開"
+        required: false
+        type: boolean
+        default: false
+      draft:
+        description: "Draft（下書き）として作成"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -14,6 +31,30 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release tag
+        id: meta
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tag = "${{ github.event.inputs.tag }}".Trim()
+          } else {
+            $tag = "${{ github.ref_name }}"
+          }
+          if ([string]::IsNullOrWhiteSpace($tag)) {
+            throw "Release tag is empty"
+          }
+          # Accept "0.2.0" or "v0.2.0"
+          if ($tag -notmatch '^v') {
+            $tag = "v$tag"
+          }
+          if ($tag -notmatch '^v[0-9]') {
+            throw "Tag must look like v1.2.3 (got: $tag)"
+          }
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "RELEASE_TAG=$tag"
 
       - name: Fetch third-party deps
         shell: pwsh
@@ -36,7 +77,7 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}"
+          $tag = "${{ steps.meta.outputs.tag }}"
           $stage = "dist\MMD-VR-Renderer-$tag"
           New-Item -ItemType Directory -Force -Path @(
             "$stage\bin",
@@ -80,23 +121,27 @@ jobs:
       - name: Build BOOTH installer
         shell: pwsh
         run: |
+          $tag = "${{ steps.meta.outputs.tag }}"
           powershell -ExecutionPolicy Bypass -File .\tools\build_booth_installer.ps1
           Copy-Item .\dist\booth\MMD-VR-Renderer-Installer.exe `
-            ".\dist\MMD-VR-Renderer-Installer-${{ github.ref_name }}.exe" -Force
+            ".\dist\MMD-VR-Renderer-Installer-$tag.exe" -Force
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: MMD-VR-Renderer ${{ github.ref_name }}
+          tag_name: ${{ steps.meta.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: MMD-VR-Renderer ${{ steps.meta.outputs.tag }}
+          draft: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.draft || false }}
+          prerelease: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.prerelease || false }}
           generate_release_notes: true
           files: |
-            dist/MMD-VR-Renderer-${{ github.ref_name }}-win64.zip
-            dist/MMD-VR-Renderer-Installer-${{ github.ref_name }}.exe
+            dist/MMD-VR-Renderer-${{ steps.meta.outputs.tag }}-win64.zip
+            dist/MMD-VR-Renderer-Installer-${{ steps.meta.outputs.tag }}.exe
           body: |
             ## 配布物 / Artifacts
-            - `MMD-VR-Renderer-${{ github.ref_name }}-win64.zip` — `d3d9.dll`（読込用）+ `d3d9_mmdvr.dll`（同内容・目印）、導入スクリプト、ドキュメント
-            - `MMD-VR-Renderer-Installer-${{ github.ref_name }}.exe` — BOOTH 向け（最新 Release を取得して MMD へ導入・更新）
+            - `MMD-VR-Renderer-${{ steps.meta.outputs.tag }}-win64.zip` — `d3d9.dll`（読込用）+ `d3d9_mmdvr.dll`（同内容・目印）、導入スクリプト、ドキュメント
+            - `MMD-VR-Renderer-Installer-${{ steps.meta.outputs.tag }}.exe` — BOOTH 向け（最新 Release を取得して MMD へ導入・更新）
 
             ## 導入 / Install
             1. zip を展開
