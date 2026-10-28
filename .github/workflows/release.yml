@@ -65,7 +65,9 @@ jobs:
       - name: Configure & build
         shell: pwsh
         run: |
-          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+          # Do not pin VS 2022: windows-latest (2025+) ships VS 2026 only.
+          # Let CMake pick the newest installed Visual Studio generator.
+          cmake -S . -B build -A x64
           cmake --build build --config Release --target d3d9 -- /m
           cmake --build build --config Release --target mmdvr_tests -- /m
           cmake --build build --config Release --target mmdvr_offline -- /m
