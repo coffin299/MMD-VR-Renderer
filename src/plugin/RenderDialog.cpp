@@ -200,11 +200,16 @@ static void updateSizeInfo(HWND hDlg) {
   int stereoIdx = (int)SendDlgItemMessageW(hDlg, IDC_STEREO, CB_GETCURSEL, 0, 0);
   int w = 0, h = 0;
   resolutionSize((ResolutionPreset)resIdx, w, h);
-  wchar_t buf[192];
+  wchar_t buf[256];
   if (stereoIdx == 1)
-    swprintf(buf, 192, ui::t().sizeStereoFmt, w, h, w * 2, h);
+    swprintf(buf, 256, ui::t().sizeStereoFmt, w, h, w * 2, h);
   else
-    swprintf(buf, 192, ui::t().sizeMonoFmt, w, h);
+    swprintf(buf, 256, ui::t().sizeMonoFmt, w, h);
+  // Append localized 8K storage warning on the size line.
+  if (resIdx == (int)ResolutionPreset::Res8K) {
+    wcsncat_s(buf, 256, L"  · ", _TRUNCATE);
+    wcsncat_s(buf, 256, ui::t().res8KWarn, _TRUNCATE);
+  }
   setText(hDlg, IDC_SIZEINFO, buf);
 }
 
@@ -256,7 +261,7 @@ static void applyLabels(HWND hDlg) {
   int codecSel = (int)SendDlgItemMessageW(hDlg, IDC_ENCODE_CODEC, CB_GETCURSEL, 0, 0);
   const wchar_t* stereoItems[] = { s.comboMono, s.comboStereo };
   const wchar_t* qualityItems[] = { s.comboHigh, s.comboBalanced, s.comboFast };
-  const wchar_t* resItems[] = { ui::kRes2K, ui::kRes3K, ui::kRes4K, ui::kRes8K };
+  const wchar_t* resItems[] = { s.comboRes2K, s.comboRes3K, s.comboRes4K, s.comboRes8K };
   const wchar_t* codecItems[] = {
     s.comboCodecLibx264, s.comboCodecAuto, s.comboCodecNvenc, s.comboCodecQsv, s.comboCodecAmf
   };
@@ -329,10 +334,15 @@ static INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM) {
     case IDC_LANG_JA:
       ui::setLang(ui::Lang::Ja);
       applyLabels(hDlg);
+      // Refresh autofill blurb in the new language if it was already shown.
+      if (GetWindowTextLengthW(GetDlgItem(hDlg, IDC_AUTOFILL_STATUS)) > 0)
+        setText(hDlg, IDC_AUTOFILL_STATUS, suggestFromThisPc().summary);
       return TRUE;
     case IDC_LANG_EN:
       ui::setLang(ui::Lang::En);
       applyLabels(hDlg);
+      if (GetWindowTextLengthW(GetDlgItem(hDlg, IDC_AUTOFILL_STATUS)) > 0)
+        setText(hDlg, IDC_AUTOFILL_STATUS, suggestFromThisPc().summary);
       return TRUE;
     case IDC_RESOLUTION:
     case IDC_STEREO:
@@ -514,7 +524,7 @@ bool ShowRenderDialog(HWND owner, RenderSettings& settings) {
 
       HWND autoBtn = CreateWindowW(L"BUTTON", L"", st, 20, 522, 620, 34, hWnd, (HMENU)IDC_AUTOFILL, 0, 0);
       SetWindowTheme(autoBtn, L"", L"");
-      CreateWindowW(L"STATIC", L"", stMulti, 20, 560, 620, 20, hWnd, (HMENU)IDC_AUTOFILL_STATUS, 0, 0);
+      CreateWindowW(L"STATIC", L"", stMulti, 20, 560, 620, 28, hWnd, (HMENU)IDC_AUTOFILL_STATUS, 0, 0);
 
       CreateWindowW(L"BUTTON", L"", st, 20, 588, 190, 36, hWnd, (HMENU)IDC_START, 0, 0);
       CreateWindowW(L"BUTTON", L"", st, 220, 588, 210, 36, hWnd, (HMENU)IDC_CAPTURE, 0, 0);

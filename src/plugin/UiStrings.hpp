@@ -31,6 +31,10 @@ struct Bundle {
   const wchar_t* labelStereo;
   const wchar_t* labelQuality;
   const wchar_t* labelResolution;
+  const wchar_t* comboRes2K;
+  const wchar_t* comboRes3K;
+  const wchar_t* comboRes4K;
+  const wchar_t* comboRes8K;
   const wchar_t* labelSizeHint;
   const wchar_t* labelFps;
   const wchar_t* labelIpd;
@@ -61,11 +65,19 @@ struct Bundle {
   const wchar_t* btnCancel;
   const wchar_t* hint;
   const wchar_t* resNote;
+  // Shown in size line when 8K is selected (disk / RAM warning).
+  const wchar_t* res8KWarn;
   const wchar_t* issuesLead;
   const wchar_t* issuesSysLink;
   const wchar_t* recommendedSpec;
   const wchar_t* prWelcome;
   const wchar_t* btnAutoFill;
+  // Autofill status: cores, ramGb, tierSummary
+  const wchar_t* hwSuggestDetailFmt;
+  const wchar_t* hwSuggestHigh;
+  const wchar_t* hwSuggestMidHigh;
+  const wchar_t* hwSuggestMid;
+  const wchar_t* hwSuggestLight;
   const wchar_t* threadsAutoHint;
   const wchar_t* queueUnlimitedHint;
   const wchar_t* progressWindowTitle;
@@ -122,10 +134,6 @@ const Bundle& t();
 // Stable across languages
 inline constexpr const wchar_t* kIssuesUrl =
     L"https://github.com/coffin299/MMD-VR-Renderer/issues";
-inline constexpr const wchar_t* kRes2K = L"2K  3840×1920";
-inline constexpr const wchar_t* kRes3K = L"3K  5760×2880";
-inline constexpr const wchar_t* kRes4K = L"4K  7680×3840";
-inline constexpr const wchar_t* kRes8K = L"8K  15360×7680 (YouTube)";
 inline constexpr const wchar_t* kBrowseFilter = L"Folder\0*\0\0";
 inline constexpr const wchar_t* kAudioFilter =
     L"Audio (*.wav;*.mp3;*.ogg;*.flac;*.m4a)\0*.wav;*.mp3;*.ogg;*.flac;*.m4a\0All\0*.*\0\0";

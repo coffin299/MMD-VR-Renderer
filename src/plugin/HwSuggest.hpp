@@ -6,6 +6,7 @@
 #include "mmdvr/Types.hpp"
 #include "UiStrings.hpp"
 #include <algorithm>
+#include <cstdio>
 #include <string>
 
 namespace mmdvr {
@@ -37,50 +38,43 @@ inline HwSuggest suggestFromThisPc() {
   out.workerThreads = out.logicalCores;
   out.fps = 60.0;
 
+  const auto& tr = ui::t();
   // Rough tiers from RAM (+cores). GPU VRAM is hard without DXGI; RAM is a good proxy for 8K frames.
-  const bool ja = ui::isJa();
+  const wchar_t* tier = tr.hwSuggestMid;
   if (out.ramMb >= 48 && out.logicalCores >= 12) {
     out.quality = QualityPreset::High;
     out.resolution = ResolutionPreset::Res8K;
     out.faceSize = 4096;
     out.writeThreads = (std::min)(6, (std::max)(2, out.logicalCores / 4));
     out.writeQueueMax = 4;
-    out.summary = ja ? L"高スペック寄り → 8K / 高画質 / 面4096"
-                     : L"High-end → 8K / High / face 4096";
+    tier = tr.hwSuggestHigh;
   } else if (out.ramMb >= 24 && out.logicalCores >= 8) {
     out.quality = QualityPreset::Balanced;
     out.resolution = ResolutionPreset::Res4K;
     out.faceSize = 2048;
     out.writeThreads = (std::min)(4, (std::max)(2, out.logicalCores / 4));
     out.writeQueueMax = 3;
-    out.summary = ja ? L"中〜高 → 4K / 標準 / 面2048"
-                     : L"Mid-high → 4K / Balanced / face 2048";
+    tier = tr.hwSuggestMidHigh;
   } else if (out.ramMb >= 12) {
     out.quality = QualityPreset::Balanced;
     out.resolution = ResolutionPreset::Res3K;
     out.faceSize = 1536;
     out.writeThreads = 2;
     out.writeQueueMax = 2;
-    out.summary = ja ? L"中スペック → 3K / 標準 / 面1536"
-                     : L"Mid → 3K / Balanced / face 1536";
+    tier = tr.hwSuggestMid;
   } else {
     out.quality = QualityPreset::Fast;
     out.resolution = ResolutionPreset::Res2K;
     out.faceSize = 1024;
     out.writeThreads = 1;
     out.writeQueueMax = 1;
-    out.summary = ja ? L"軽め → 2K / 高速 / 面1024"
-                     : L"Light → 2K / Fast / face 1024";
+    tier = tr.hwSuggestLight;
   }
 
-  wchar_t detail[180];
-  if (ja) {
-    swprintf(detail, 180, L"検出: CPU %d スレッド / RAM %llu GB · %s",
-             out.logicalCores, (unsigned long long)(out.ramMb / 1024), out.summary.c_str());
-  } else {
-    swprintf(detail, 180, L"Detected: %d CPU threads / %llu GB RAM · %s",
-             out.logicalCores, (unsigned long long)(out.ramMb / 1024), out.summary.c_str());
-  }
+  // Use %u (not %llu) so MSVC swprintf matches the same way in EN/JA builds.
+  const unsigned ramGb = (unsigned)(out.ramMb / 1024ull);
+  wchar_t detail[256];
+  std::swprintf(detail, 256, tr.hwSuggestDetailFmt, out.logicalCores, ramGb, tier);
   out.summary = detail;
   return out;
 }
