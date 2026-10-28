@@ -108,7 +108,7 @@ bool JobState::load(const std::wstring& path, JobStateData& out) {
     out.settings.fps = s.value("fps", 60.0);
     out.settings.frameStart = s.value("frameStart", 0);
     out.settings.frameEnd = s.value("frameEnd", -1);
-    out.settings.ipdUnits = (float)s.value("ipdUnits", 0.65);
+    out.settings.ipdUnits = (float)s.value("ipdUnits", 2.0);
     out.settings.outputDir = widen(s.value("outputDir", std::string{}));
     out.settings.encodeVideo = s.value("encodeVideo", true);
     out.settings.encodeCodec = (EncodeCodec)s.value("encodeCodec", (int)EncodeCodec::Libx264);

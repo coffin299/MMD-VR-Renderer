@@ -93,6 +93,46 @@ static void refillCombo(HWND hDlg, int id, const wchar_t* const* items, int coun
   SendDlgItemMessageW(hDlg, id, CB_SETCURSEL, sel, 0);
 }
 
+// Cubemap face edge presets. 0 = auto from resolution/quality.
+constexpr int kFaceSizePresets[] = {0, 512, 1024, 1536, 2048, 3072, 4096};
+constexpr int kFaceSizePresetCount =
+    static_cast<int>(sizeof(kFaceSizePresets) / sizeof(kFaceSizePresets[0]));
+
+static int faceSizeToComboIndex(int faceSize) {
+  if (faceSize <= 0) return 0;
+  int best = 1;
+  int bestDist = abs(kFaceSizePresets[1] - faceSize);
+  for (int i = 1; i < kFaceSizePresetCount; ++i) {
+    if (kFaceSizePresets[i] == faceSize) return i;
+    const int d = abs(kFaceSizePresets[i] - faceSize);
+    if (d < bestDist) {
+      bestDist = d;
+      best = i;
+    }
+  }
+  return best;
+}
+
+static int comboIndexToFaceSize(int idx) {
+  if (idx < 0 || idx >= kFaceSizePresetCount) return 0;
+  return kFaceSizePresets[idx];
+}
+
+static void refillFaceCombo(HWND hDlg, int faceSize) {
+  const auto& s = ui::t();
+  SendDlgItemMessageW(hDlg, IDC_FACE, CB_RESETCONTENT, 0, 0);
+  for (int i = 0; i < kFaceSizePresetCount; ++i) {
+    if (kFaceSizePresets[i] <= 0) {
+      SendDlgItemMessageW(hDlg, IDC_FACE, CB_ADDSTRING, 0, (LPARAM)s.comboFaceAuto);
+    } else {
+      wchar_t buf[32];
+      swprintf(buf, 32, L"%d", kFaceSizePresets[i]);
+      SendDlgItemMessageW(hDlg, IDC_FACE, CB_ADDSTRING, 0, (LPARAM)buf);
+    }
+  }
+  SendDlgItemMessageW(hDlg, IDC_FACE, CB_SETCURSEL, faceSizeToComboIndex(faceSize), 0);
+}
+
 static void updateSizeInfo(HWND hDlg) {
   int resIdx = (int)SendDlgItemMessageW(hDlg, IDC_RESOLUTION, CB_GETCURSEL, 0, 0);
   if (resIdx < 0) resIdx = (int)ResolutionPreset::Res8K;
@@ -161,6 +201,8 @@ static void applyLabels(HWND hDlg) {
   refillCombo(hDlg, IDC_QUALITY, qualityItems, 3, qualitySel);
   refillCombo(hDlg, IDC_RESOLUTION, resItems, 4, resSel);
   refillCombo(hDlg, IDC_ENCODE_CODEC, codecItems, 5, codecSel < 0 ? 0 : codecSel);
+  const int faceSel = (int)SendDlgItemMessageW(hDlg, IDC_FACE, CB_GETCURSEL, 0, 0);
+  refillFaceCombo(hDlg, comboIndexToFaceSize(faceSel));
   updateSizeInfo(hDlg);
 }
 
@@ -170,7 +212,7 @@ static void applyHwSuggestToUi(HWND hDlg) {
   SendDlgItemMessageW(hDlg, IDC_RESOLUTION, CB_SETCURSEL, (WPARAM)sug.resolution, 0);
   setText(hDlg, IDC_FPS, std::to_wstring((int)sug.fps));
   setText(hDlg, IDC_THREADS, std::to_wstring(sug.workerThreads));
-  setText(hDlg, IDC_FACE, std::to_wstring(sug.faceSize));
+  SendDlgItemMessageW(hDlg, IDC_FACE, CB_SETCURSEL, faceSizeToComboIndex(sug.faceSize), 0);
   setText(hDlg, IDC_WRITE_THREADS, std::to_wstring(sug.writeThreads));
   setText(hDlg, IDC_WRITE_QUEUE, std::to_wstring(sug.writeQueueMax));
   updateSizeInfo(hDlg);
@@ -193,7 +235,7 @@ static INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM) {
     updateSizeInfo(hDlg);
     setText(hDlg, IDC_FPS, std::to_wstring((int)s.fps));
     setText(hDlg, IDC_THREADS, std::to_wstring(s.workerThreads));
-    setText(hDlg, IDC_FACE, std::to_wstring(s.faceSize));
+    refillFaceCombo(hDlg, s.faceSize);
     setText(hDlg, IDC_WRITE_THREADS, std::to_wstring(s.writeThreads));
     setText(hDlg, IDC_WRITE_QUEUE, std::to_wstring(s.writeQueueMax));
     setText(hDlg, IDC_IPD, std::to_wstring(s.ipdUnits));
@@ -269,8 +311,8 @@ static INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM) {
       if (s.fps < 1.0) s.fps = 60.0;
       s.workerThreads = _wtoi(getText(hDlg, IDC_THREADS).c_str());
       if (s.workerThreads < 0) s.workerThreads = 0;
-      s.faceSize = _wtoi(getText(hDlg, IDC_FACE).c_str());
-      if (s.faceSize < 0) s.faceSize = 0;
+      s.faceSize = comboIndexToFaceSize(
+          (int)SendDlgItemMessageW(hDlg, IDC_FACE, CB_GETCURSEL, 0, 0));
       s.writeThreads = _wtoi(getText(hDlg, IDC_WRITE_THREADS).c_str());
       if (s.writeThreads < 1) s.writeThreads = 1;
       s.writeQueueMax = _wtoi(getText(hDlg, IDC_WRITE_QUEUE).c_str());
@@ -355,12 +397,11 @@ bool ShowRenderDialog(HWND owner, RenderSettings& settings) {
       CreateWindowW(L"STATIC", L"", st, 428, 180, 90, 20, hWnd, (HMENU)IDC_LBL_THREADS_HINT, 0, 0);
 
       CreateWindowW(L"STATIC", L"", st, 20, 208, 150, 20, hWnd, (HMENU)IDC_LBL_FACE, 0, 0);
-      CreateWindowW(L"EDIT", L"", st | WS_BORDER, 180, 206, 70, 22, hWnd, (HMENU)IDC_FACE, 0, 0);
-      CreateWindowW(L"STATIC", L"", st, 260, 208, 80, 20, hWnd, (HMENU)IDC_LBL_WRITE, 0, 0);
-      CreateWindowW(L"EDIT", L"", st | WS_BORDER, 345, 206, 50, 22, hWnd, (HMENU)IDC_WRITE_THREADS, 0, 0);
-      CreateWindowW(L"STATIC", L"", st, 405, 208, 100, 20, hWnd, (HMENU)IDC_LBL_QUEUE, 0, 0);
-      CreateWindowW(L"EDIT", L"", st | WS_BORDER, 515, 206, 50, 22, hWnd, (HMENU)IDC_WRITE_QUEUE, 0, 0);
-      CreateWindowW(L"STATIC", L"", st, 570, 208, 70, 20, hWnd, (HMENU)IDC_LBL_QUEUE_HINT, 0, 0);
+      CreateWindowW(L"COMBOBOX", L"", st | CBS_DROPDOWNLIST, 180, 206, 200, 200, hWnd, (HMENU)IDC_FACE, 0, 0);
+      CreateWindowW(L"STATIC", L"", st, 390, 208, 70, 20, hWnd, (HMENU)IDC_LBL_WRITE, 0, 0);
+      CreateWindowW(L"EDIT", L"", st | WS_BORDER, 465, 206, 45, 22, hWnd, (HMENU)IDC_WRITE_THREADS, 0, 0);
+      CreateWindowW(L"STATIC", L"", st, 520, 208, 70, 20, hWnd, (HMENU)IDC_LBL_QUEUE, 0, 0);
+      CreateWindowW(L"EDIT", L"", st | WS_BORDER, 595, 206, 40, 22, hWnd, (HMENU)IDC_WRITE_QUEUE, 0, 0);
       CreateWindowW(L"STATIC", L"", stMulti, 20, 232, 620, 20, hWnd, (HMENU)IDC_LBL_FACE_HINT, 0, 0);
 
       CreateWindowW(L"STATIC", L"", st, 20, 258, 150, 20, hWnd, (HMENU)IDC_LBL_IPD, 0, 0);

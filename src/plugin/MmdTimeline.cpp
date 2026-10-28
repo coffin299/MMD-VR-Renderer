@@ -13,6 +13,12 @@ namespace {
 constexpr std::array<int, 7> kCameraEditIds = {
     544, 545, 546, 547, 548, 549, 550}; // X/Y/Z, Rx/Ry/Rz, distance (MMD 9.32 x64)
 
+// MMD 9.32 x64 viewport-overlay controls (Present includes these when active).
+constexpr int kEditTargetComboId = 436;   // カメラ･照明･アクセサリ | models...
+constexpr int kModelEditButtonId = 536;   // モデル編 / カメラ編
+constexpr int kBoneSelectButtonId = 490;  // 選択 — toggles bone ○/□ markers
+constexpr int kAxisButtonId = 557;        // 座標軸
+
 struct FindCtx {
   HWND best = nullptr;
   int bestScore = -1;
@@ -254,6 +260,118 @@ bool MmdTimeline::applyCamera(const MmdCameraUiState& state) {
   return true;
 }
 
+HWND MmdTimeline::findChildById(HWND root, int id) {
+  if (!root || !IsWindow(root) || id == 0) return nullptr;
+  struct Ctx { int id; HWND found; };
+  Ctx ctx{id, nullptr};
+  EnumChildWindows(
+      root,
+      [](HWND hwnd, LPARAM lp) -> BOOL {
+        auto* c = reinterpret_cast<Ctx*>(lp);
+        if (GetDlgCtrlID(hwnd) == c->id) {
+          c->found = hwnd;
+          return FALSE;
+        }
+        return TRUE;
+      },
+      reinterpret_cast<LPARAM>(&ctx));
+  return ctx.found;
+}
+
+bool MmdTimeline::suppressViewportOverlays() {
+  if (!mmdMain_ || !IsWindow(mmdMain_)) return false;
+
+  HWND combo = findChildById(mmdMain_, kEditTargetComboId);
+  if (!combo) {
+    Diagnostics::instance().warn(
+        "MmdTimeline: edit-target combo not found; camera ◎ may remain in capture");
+    return false;
+  }
+
+  const int count = static_cast<int>(SendMessageW(combo, CB_GETCOUNT, 0, 0));
+  const int sel = static_cast<int>(SendMessageW(combo, CB_GETCURSEL, 0, 0));
+  if (!editTargetSaved_) {
+    savedEditTarget_ = sel;
+    editTargetSaved_ = true;
+  }
+
+  auto notifyCombo = [&](HWND cb) {
+    HWND parent = GetParent(cb);
+    const WPARAM wp = MAKEWPARAM(kEditTargetComboId, CBN_SELCHANGE);
+    if (parent) SendMessageW(parent, WM_COMMAND, wp, reinterpret_cast<LPARAM>(cb));
+    SendMessageW(mmdMain_, WM_COMMAND, wp, reinterpret_cast<LPARAM>(cb));
+  };
+
+  // Index 0 is カメラ･照明･アクセサリ — that mode draws the red look-at ◎.
+  if (count > 1 && sel <= 0) {
+    SendMessageW(combo, CB_SETCURSEL, 1, 0);
+    notifyCombo(combo);
+  }
+
+  // If the panel toggle still says モデル編, click it to leave camera mode.
+  if (HWND modelBtn = findChildById(mmdMain_, kModelEditButtonId)) {
+    if (IsWindowVisible(modelBtn)) {
+      wchar_t text[64]{};
+      GetWindowTextW(modelBtn, text, static_cast<int>(std::size(text)));
+      if (wcsstr(text, L"モデル") || wcsstr(text, L"Model")) {
+        SendMessageW(modelBtn, BM_CLICK, 0, 0);
+      }
+    }
+  }
+
+  Sleep(35);
+
+  // Bone ○ markers appear in model mode while 選択 is latched on.
+  if (HWND selectBtn = findChildById(mmdMain_, kBoneSelectButtonId)) {
+    if (IsWindowVisible(selectBtn)) {
+      const LRESULT st = SendMessageW(selectBtn, BM_GETSTATE, 0, 0);
+      if (st & BST_CHECKED) {
+        SendMessageW(selectBtn, BM_CLICK, 0, 0);
+      }
+    }
+  }
+
+  // Hide world axes if the toolbar button is latched on.
+  if (HWND axisBtn = findChildById(mmdMain_, kAxisButtonId)) {
+    if (IsWindowVisible(axisBtn)) {
+      const LRESULT st = SendMessageW(axisBtn, BM_GETSTATE, 0, 0);
+      if (st & BST_CHECKED) {
+        SendMessageW(axisBtn, BM_CLICK, 0, 0);
+      }
+    }
+  }
+
+  Sleep(20);
+  Diagnostics::instance().info("MmdTimeline: viewport overlays suppressed for capture");
+  return true;
+}
+
+void MmdTimeline::restoreEditTarget() {
+  if (!editTargetSaved_) return;
+  editTargetSaved_ = false;
+  if (!mmdMain_ || !IsWindow(mmdMain_)) {
+    savedEditTarget_ = -1;
+    return;
+  }
+  HWND combo = findChildById(mmdMain_, kEditTargetComboId);
+  if (!combo || savedEditTarget_ < 0) {
+    savedEditTarget_ = -1;
+    return;
+  }
+  const int count = static_cast<int>(SendMessageW(combo, CB_GETCOUNT, 0, 0));
+  if (savedEditTarget_ >= count) {
+    savedEditTarget_ = -1;
+    return;
+  }
+  SendMessageW(combo, CB_SETCURSEL, savedEditTarget_, 0);
+  HWND parent = GetParent(combo);
+  const WPARAM wp = MAKEWPARAM(kEditTargetComboId, CBN_SELCHANGE);
+  if (parent) SendMessageW(parent, WM_COMMAND, wp, reinterpret_cast<LPARAM>(combo));
+  SendMessageW(mmdMain_, WM_COMMAND, wp, reinterpret_cast<LPARAM>(combo));
+  savedEditTarget_ = -1;
+  Diagnostics::instance().info("MmdTimeline: edit target restored");
+}
+
 bool MmdTimeline::applyCameraFace(
     const MmdCameraUiState& base, const CameraState& desired) {
   if (!base.valid || !desired.valid) return false;
@@ -276,21 +394,64 @@ bool MmdTimeline::applyCameraFace(
   // MMD UI coordinates because the observed D3D camera can be ray-mmd's
   // internal pass camera rather than MMD's scene camera.
   const OrbitOffset faceOrbit = orbitOffset(state);
-  state.x = base.x + baseOrbit.x - faceOrbit.x + desired.nativeEyeOffsetX;
-  state.y = base.y + baseOrbit.y - faceOrbit.y;
-  state.z = base.z + baseOrbit.z - faceOrbit.z;
+
+  // Parallel stereo: shift center (and therefore eye) along the BASE camera's
+  // right axis. nativeEyeOffsetX is signed half-IPD (±ipd/2). World-X alone is
+  // wrong whenever the shot has yaw — side faces then slide along the view axis
+  // and lose parallax.
+  double eyeOx = 0.0, eyeOy = 0.0, eyeOz = 0.0;
+  const double eyeShift = static_cast<double>(desired.nativeEyeOffsetX);
+  if (eyeShift != 0.0) {
+    const double fx = -baseOrbit.x;
+    const double fy = -baseOrbit.y;
+    const double fz = -baseOrbit.z;
+    const double fl = std::sqrt(fx * fx + fy * fy + fz * fz);
+    double rx = 0.0, ry = 0.0, rz = 0.0;
+    if (fl > 1e-8) {
+      const double inv = 1.0 / fl;
+      const double nfx = fx * inv, nfy = fy * inv, nfz = fz * inv;
+      // right = forward × worldUp
+      rx = -nfz;
+      ry = 0.0;
+      rz = nfx;
+      const double rl = std::sqrt(rx * rx + ry * ry + rz * rz);
+      if (rl > 1e-8) {
+        rx = (rx / rl) * eyeShift;
+        ry = (ry / rl) * eyeShift;
+        rz = (rz / rl) * eyeShift;
+      } else {
+        // Looking nearly straight up/down: fall back to yaw-horizontal right.
+        constexpr double kPi = 3.14159265358979323846;
+        const double yaw = base.rotY * kPi / 180.0;
+        rx = std::cos(yaw) * eyeShift;
+        rz = -std::sin(yaw) * eyeShift;
+      }
+    } else {
+      rx = eyeShift;
+    }
+    eyeOx = rx;
+    eyeOy = ry;
+    eyeOz = rz;
+  }
+
+  state.x = base.x + baseOrbit.x - faceOrbit.x + eyeOx;
+  state.y = base.y + baseOrbit.y - faceOrbit.y + eyeOy;
+  state.z = base.z + baseOrbit.z - faceOrbit.z + eyeOz;
   if (!applyCamera(state)) return false;
 
   MmdCameraUiState applied;
   if (readCamera(applied)) {
-    char msg[320];
+    char msg[384];
     std::snprintf(
         msg, sizeof(msg),
         "MmdTimeline: native face=%d requested center=(%.3f,%.3f,%.3f) "
-        "rot=(%.3f,%.3f,%.3f), readback rot=(%.3f,%.3f,%.3f)",
+        "stereo=(%.3f,%.3f,%.3f) rot=(%.3f,%.3f,%.3f), "
+        "readback center=(%.3f,%.3f,%.3f) rot=(%.3f,%.3f,%.3f)",
         static_cast<int>(desired.cubeFace),
         state.x, state.y, state.z,
+        eyeOx, eyeOy, eyeOz,
         state.rotX, state.rotY, state.rotZ,
+        applied.x, applied.y, applied.z,
         applied.rotX, applied.rotY, applied.rotZ);
     Diagnostics::instance().info(msg);
   } else {

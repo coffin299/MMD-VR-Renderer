@@ -367,12 +367,16 @@ bool PluginHost::seekAnimationFrame(int frameIndex) {
 }
 
 void PluginHost::restoreSceneCamera() {
-  if (!nativeCameraApplied_) return;
+  if (!nativeCameraApplied_) {
+    timeline_.restoreEditTarget();
+    return;
+  }
   if (!nativeCameraBase_.valid || !timeline_.applyCamera(nativeCameraBase_)) {
     Diagnostics::instance().warn("restoreSceneCamera: failed to restore MMD camera controls");
   } else {
     Diagnostics::instance().info("restoreSceneCamera: MMD camera restored");
   }
+  timeline_.restoreEditTarget();
   nativeCameraApplied_ = false;
 }
 
@@ -457,9 +461,12 @@ bool PluginHost::renderView(const CameraState& cam, ImageBuffer& out) {
     Diagnostics::instance().error("renderView: failed to apply native MMD camera face");
     return false;
   }
+  // applyCameraFace selects camera mode and draws the red look-at ◎ into the
+  // 3D view. Leave that mode (and bone markers) before Present is sampled.
+  timeline_.suppressViewportOverlays();
   nativeCameraApplied_ = true;
   char armed[128];
-  std::snprintf(armed, sizeof(armed), "renderView: native face=%d eyeX=%.3f armed (skip=1)",
+  std::snprintf(armed, sizeof(armed), "renderView: native face=%d halfIpd=%.3f armed (skip=1)",
                 static_cast<int>(cam.cubeFace), cam.nativeEyeOffsetX);
   Diagnostics::instance().info(armed);
 

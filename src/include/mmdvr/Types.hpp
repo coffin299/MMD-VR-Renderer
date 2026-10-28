@@ -101,6 +101,8 @@ struct CameraState {
   // Native MMD camera UI path: this is the cubemap direction to apply through
   // MMD itself before MME/ray-mmd evaluates a full frame.
   CubeFace cubeFace = CubeFace::PosZ;
+  // Signed half-IPD (±ipd/2). applyCameraFace shifts along the base camera's
+  // right axis (not world X), so yawed shots keep lateral parallax.
   float nativeEyeOffsetX = 0.f;
   float fovYDeg = 90.f;
   float aspect = 1.f;
@@ -133,8 +135,10 @@ struct RenderSettings {
   double fps = 60.0; // VR default: higher FPS reduces nausea
   int frameStart = 0;
   int frameEnd = -1;         // -1 = use project end / unknown
-  float ipd = 0.065f;        // meters (MMD units ~ cm*0.01; treat as world units scale)
-  float ipdUnits = 0.65f;    // practical MMD world-unit IPD (approx cm/10)
+  float ipd = 0.065f;        // meters (UI/docs only; runtime uses ipdUnits)
+  // MMD world-unit IPD. ~0.8 ≈ real 6.5cm at classic ~20-unit models; default
+  // is stronger so depth reads clearly at typical camera distances (30–50).
+  float ipdUnits = 2.0f;
   std::wstring outputDir;
   std::wstring ffmpegPath;
   // Optional: mux this audio into the MP4 (MMD-loaded WAV path, or manual browse).
