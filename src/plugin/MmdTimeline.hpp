@@ -43,18 +43,33 @@ public:
   // native eye by moving that center as each cubemap direction is applied.
   bool applyCameraFace(const MmdCameraUiState& base, const CameraState& desired);
 
-  // Switch the camera/light editor to Light after camera edits have committed.
-  // This hides MMD's camera target ◎ without selecting a model (which changes
-  // the active scene view). Call after applyCameraFace.
+  // Hide MMD viewport-only overlays while the renderer is armed. Camera ◎
+  // remains pixel-repaired as a fallback; coordinate axes can be disabled at
+  // their source and are restored when the session ends.
   bool suppressViewportOverlays();
-  // Restore the camera/light editor selection saved for the render session.
+  // Restore the camera/light editor selection and viewport-overlay state.
   void restoreEditTarget();
+
+  // MMD's 「表示 > 出力サイズ」 controls the real D3D render target. The
+  // cubemap face capture must raise this before any Present is sampled; merely
+  // scaling the captured 1080p viewport cannot produce an 8K-quality result.
+  bool setOutputSize(int width, int height);
+  void restoreOutputSize();
+  // MMD's screen-capture mode runs before editor overlays. Keep the user's
+  // selected mode and restore it when the render session ends.
+  bool enableScreenCaptureMode1();
+  void restoreScreenCaptureMode();
 
 private:
   HWND mmdMain_ = nullptr;
   HWND frameEdit_ = nullptr;
   std::array<HWND, 7> cameraEdits_{};
   int savedCameraLightTarget_ = -1;
+  int savedOutputWidth_ = 0;
+  int savedOutputHeight_ = 0;
+  int savedScreenCaptureCommand_ = -1;
+  int savedCoordinateAxisVisible_ = -1;
+  bool coordinateAxisCaptureHidden_ = false;
 
   static bool isDigitText(const std::wstring& s);
   static BOOL CALLBACK enumFindFrameEdit(HWND hwnd, LPARAM lp);
@@ -63,6 +78,8 @@ private:
   bool bindCameraEdits();
   bool selectCameraLightTarget(int selection);
   bool ensureCameraTargetSelected();
+  bool setCoordinateAxisVisible(bool visible);
+  bool setOutputSizeInternal(int width, int height, bool saveCurrent);
   static bool readDouble(HWND edit, double& out);
   static bool writeDouble(HWND edit, double value);
   static void notifyEditChanged(HWND edit);

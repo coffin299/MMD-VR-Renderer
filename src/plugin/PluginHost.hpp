@@ -19,6 +19,11 @@ public:
   void onDeviceCreated(IDirect3DDevice9* device);
   void onDeviceReset();
   void onBeforePresent(IDirect3DDevice9* device);
+  // Called immediately before an application GetRenderTargetData call. MMD's
+  // screen-capture copy occurs before it draws editor overlays.
+  void onBeforeGetRenderTargetData(IDirect3DDevice9* device, IDirect3DSurface9* source);
+  void onBeforeStretchRect(IDirect3DDevice9* device, IDirect3DSurface9* source,
+                           IDirect3DSurface9* destination);
   void onBeginScene(IDirect3DDevice9* device);
   void onSetRenderTarget(IDirect3DSurface9* rt);
   void onMainPassDraw();
@@ -59,6 +64,7 @@ private:
   MmdTimeline timeline_;
   MmdCameraUiState nativeCameraBase_{};
   bool nativeCameraApplied_ = false;
+  bool mmdOutputSizeConfigured_ = false;
   IDirect3DDevice9* device_ = nullptr;
   HWND mmdHwnd_ = nullptr;
 
@@ -66,6 +72,7 @@ private:
   std::condition_variable redrawCv_;
   bool wantCapture_ = false;
   bool captureReady_ = false;
+  bool preOverlayCandidateLogged_ = false;
   ImageBuffer pendingCapture_;
   CameraState pendingCam_{};
   int skipCaptures_ = 0;
@@ -86,6 +93,8 @@ private:
 
   void refreshBackbufferSize();
   void observeCameraFromDevice(IDirect3DDevice9* device);
+  void stagePreOverlaySource(IDirect3DDevice9* device, IDirect3DSurface9* source,
+                             const char* operation);
   static bool isPerspectiveProjection(const D3DMATRIX* m);
 };
 

@@ -14,6 +14,9 @@ namespace mmdvr {
 using CreateDevice_t = HRESULT (WINAPI*)(IDirect3D9*, UINT, D3DDEVTYPE, HWND, DWORD, D3DPRESENT_PARAMETERS*, IDirect3DDevice9**);
 using Present_t = HRESULT (WINAPI*)(IDirect3DDevice9*, const RECT*, const RECT*, HWND, const RGNDATA*);
 using Reset_t = HRESULT (WINAPI*)(IDirect3DDevice9*, D3DPRESENT_PARAMETERS*);
+using GetRenderTargetData_t = HRESULT (WINAPI*)(IDirect3DDevice9*, IDirect3DSurface9*, IDirect3DSurface9*);
+using StretchRect_t = HRESULT (WINAPI*)(IDirect3DDevice9*, IDirect3DSurface9*, const RECT*,
+                                        IDirect3DSurface9*, const RECT*, D3DTEXTUREFILTERTYPE);
 using SetTransform_t = HRESULT (WINAPI*)(IDirect3DDevice9*, D3DTRANSFORMSTATETYPE, const D3DMATRIX*);
 using GetTransform_t = HRESULT (WINAPI*)(IDirect3DDevice9*, D3DTRANSFORMSTATETYPE, D3DMATRIX*);
 using SetRenderTarget_t = HRESULT (WINAPI*)(IDirect3DDevice9*, DWORD, IDirect3DSurface9*);
@@ -24,6 +27,8 @@ using DrawIndexedPrimitive_t = HRESULT (WINAPI*)(IDirect3DDevice9*, D3DPRIMITIVE
 static CreateDevice_t g_CreateDevice = nullptr;
 static Present_t g_Present = nullptr;
 static Reset_t g_Reset = nullptr;
+static GetRenderTargetData_t g_GetRenderTargetData = nullptr;
+static StretchRect_t g_StretchRect = nullptr;
 static SetTransform_t g_SetTransform = nullptr;
 static GetTransform_t g_GetTransform = nullptr;
 static SetRenderTarget_t g_SetRenderTarget = nullptr;
@@ -61,6 +66,19 @@ static HRESULT WINAPI Hook_Reset(IDirect3DDevice9* self, D3DPRESENT_PARAMETERS* 
   HRESULT hr = g_Reset(self, pp);
   if (SUCCEEDED(hr)) PluginHost::instance().onDeviceReset();
   return hr;
+}
+
+static HRESULT WINAPI Hook_GetRenderTargetData(
+    IDirect3DDevice9* self, IDirect3DSurface9* source, IDirect3DSurface9* destination) {
+  PluginHost::instance().onBeforeGetRenderTargetData(self, source);
+  return g_GetRenderTargetData(self, source, destination);
+}
+
+static HRESULT WINAPI Hook_StretchRect(
+    IDirect3DDevice9* self, IDirect3DSurface9* source, const RECT* sourceRect,
+    IDirect3DSurface9* destination, const RECT* destinationRect, D3DTEXTUREFILTERTYPE filter) {
+  PluginHost::instance().onBeforeStretchRect(self, source, destination);
+  return g_StretchRect(self, source, sourceRect, destination, destinationRect, filter);
 }
 
 static HRESULT WINAPI Hook_SetRenderTarget(IDirect3DDevice9* self, DWORD index, IDirect3DSurface9* rt) {
@@ -115,10 +133,13 @@ static HRESULT WINAPI Hook_DrawIndexedPrimitive(
 
 void HookDevice(IDirect3DDevice9* device) {
   if (!device) return;
-  // 16 Reset, 17 Present, 37 SetRenderTarget, 41 BeginScene,
+  // 16 Reset, 17 Present, 32 GetRenderTargetData, 34 StretchRect,
+  // 37 SetRenderTarget, 41 BeginScene,
   // 44 SetTransform, 45 GetTransform, 81 DrawPrimitive, 82 DrawIndexedPrimitive
   void* pReset = vtable_slot(device, 16);
   void* pPresent = vtable_slot(device, 17);
+  void* pGetRenderTargetData = vtable_slot(device, 32);
+  void* pStretchRect = vtable_slot(device, 34);
   void* pSetRT = vtable_slot(device, 37);
   void* pBegin = vtable_slot(device, 41);
   void* pSetTransform = vtable_slot(device, 44);
@@ -130,6 +151,8 @@ void HookDevice(IDirect3DDevice9* device) {
     g_hooksInstalled = true;
     MH_CreateHook(pPresent, &Hook_Present, (LPVOID*)&g_Present);
     MH_CreateHook(pReset, &Hook_Reset, (LPVOID*)&g_Reset);
+    MH_CreateHook(pGetRenderTargetData, &Hook_GetRenderTargetData, (LPVOID*)&g_GetRenderTargetData);
+    MH_CreateHook(pStretchRect, &Hook_StretchRect, (LPVOID*)&g_StretchRect);
     MH_CreateHook(pSetRT, &Hook_SetRenderTarget, (LPVOID*)&g_SetRenderTarget);
     MH_CreateHook(pBegin, &Hook_BeginScene, (LPVOID*)&g_BeginScene);
     MH_CreateHook(pSetTransform, &Hook_SetTransform, (LPVOID*)&g_SetTransform);
@@ -138,7 +161,7 @@ void HookDevice(IDirect3DDevice9* device) {
     MH_CreateHook(pDrawIndexed, &Hook_DrawIndexedPrimitive, (LPVOID*)&g_DrawIndexedPrimitive);
     MH_EnableHook(MH_ALL_HOOKS);
     Diagnostics::instance().info(
-        "Device hooks installed (Present/Reset/SetRT/BeginScene/Set|GetTransform/Draw*)");
+        "Device hooks installed (Present/Reset/GetRenderTargetData/StretchRect/SetRT/BeginScene/Set|GetTransform/Draw*)");
   }
   PluginHost::instance().onDeviceCreated(device);
 }

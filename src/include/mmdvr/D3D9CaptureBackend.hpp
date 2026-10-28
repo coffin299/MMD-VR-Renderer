@@ -25,6 +25,14 @@ public:
   IDirect3DDevice9* device() const { return device_; }
 
   bool captureViewport(ImageBuffer& out, int maxSide = 0) override;
+  // Save an MMD screen-capture source before editor UI is drawn. The surface
+  // is copied on the D3D thread and read back later at the normal Present
+  // synchronization point.
+  bool stageSurface(IDirect3DSurface9* source);
+  bool captureStaged(ImageBuffer& out, int maxSide = 0);
+  bool hasStagedSurface() const;
+  bool ownsSurface(IDirect3DSurface9* surface) const;
+  void clearStagedSurface();
   void setViewportCrop(int x, int y, int w, int h);
   void clearCrop();
   void setDefaultMaxSide(int maxSide);
@@ -53,8 +61,16 @@ private:
   int poolW_ = 0, poolH_ = 0;
   D3DFORMAT poolFmt_ = D3DFMT_UNKNOWN;
 
+  // Full-resolution copy of MMD's pre-overlay screen-capture source.
+  IDirect3DSurface9* stagedGpu_ = nullptr;
+  int stagedW_ = 0, stagedH_ = 0;
+  D3DFORMAT stagedFmt_ = D3DFMT_UNKNOWN;
+  bool stagedReady_ = false;
+
   bool ensurePool(IDirect3DDevice9* dev, int w, int h, D3DFORMAT fmt);
+  bool ensureStaged(IDirect3DDevice9* dev, int w, int h, D3DFORMAT fmt);
   void releasePoolUnlocked();
+  void releaseStagedUnlocked();
 };
 
 } // namespace mmdvr

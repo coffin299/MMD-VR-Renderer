@@ -18,10 +18,113 @@
 #include <cwchar>
 #include <cstring>
 #include <string>
+#include <vector>
 
 namespace fs = std::filesystem;
 
 namespace mmdvr {
+namespace {
+
+// MMD 9.32 draws the camera target ◎ into the center of the active camera
+// view, even when the Camera/Light selector is moved away from Camera. It is
+// a small, fixed magenta UI overlay (approximately #ED145B), not scene data.
+// Repair only matching pixels in a tight center region so the 3D render stays
+// untouched. This runs before cubemap projection, keeping the mark out of the
+// final equirectangular image as well as debug face dumps.
+void removeMmdCameraTargetMarker(ImageBuffer& image) {
+  if (image.empty() || image.width < 32 || image.height < 32) return;
+
+  const int cx = image.width / 2;
+  const int cy = image.height / 2;
+  const int radius = 18;
+  const int left = (std::max)(0, cx - radius);
+  const int top = (std::max)(0, cy - radius);
+  const int right = (std::min)(image.width - 1, cx + radius);
+  const int bottom = (std::min)(image.height - 1, cy + radius);
+  const size_t pixelCount = static_cast<size_t>(image.width) * static_cast<size_t>(image.height);
+  std::vector<uint8_t> mask(pixelCount, 0);
+  int marked = 0;
+
+  auto index = [&](int x, int y) {
+    return static_cast<size_t>(y) * static_cast<size_t>(image.width) + static_cast<size_t>(x);
+  };
+  for (int y = top; y <= bottom; ++y) {
+    for (int x = left; x <= right; ++x) {
+      const size_t p = index(x, y);
+      const size_t i = p * 4;
+      const int r = image.rgba[i + 0];
+      const int g = image.rgba[i + 1];
+      const int b = image.rgba[i + 2];
+      // Covers MMD 9.32's #ED145B marker plus its alpha-blended edge. The
+      // readback preserves the overlay's alpha, so a white background yields
+      // light pink values around (247, 170, 200), not just the solid color.
+      const bool lightMarker =
+          r >= 220 && g <= 190 && b >= 120 && b <= 225 &&
+          r - g >= 45 && r - b >= 25;
+      const bool darkMarker =
+          r >= 130 && r <= 240 && g <= 140 && b <= 180 &&
+          r - g >= 55 && r - b >= 25;
+      if (lightMarker || darkMarker) {
+        mask[p] = 1;
+        ++marked;
+      }
+    }
+  }
+  // A handful of pink scene pixels near the middle are not enough evidence.
+  if (marked < 12) return;
+
+  // The marker has anti-aliased translucent pixels whose color is the
+  // underlying scene rather than magenta. Include its immediate boundary so
+  // a thin red ring cannot survive the color-only pass.
+  const std::vector<uint8_t> detected = mask;
+  for (int y = top; y <= bottom; ++y) {
+    for (int x = left; x <= right; ++x) {
+      if (!detected[index(x, y)]) continue;
+      for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+          const int nx = x + dx;
+          const int ny = y + dy;
+          if (nx >= left && nx <= right && ny >= top && ny <= bottom)
+            mask[index(nx, ny)] = 1;
+        }
+      }
+    }
+  }
+
+  const std::vector<uint8_t> source = image.rgba;
+  constexpr int kDirs[][2] = {
+      {-1, 0}, {1, 0}, {0, -1}, {0, 1},
+      {-1, -1}, {1, -1}, {-1, 1}, {1, 1},
+  };
+  for (int y = top; y <= bottom; ++y) {
+    for (int x = left; x <= right; ++x) {
+      const size_t p = index(x, y);
+      if (!mask[p]) continue;
+
+      int sum[4] = {0, 0, 0, 0};
+      int samples = 0;
+      for (const auto& dir : kDirs) {
+        for (int step = 1; step <= 12; ++step) {
+          const int sx = x + dir[0] * step;
+          const int sy = y + dir[1] * step;
+          if (sx < 0 || sx >= image.width || sy < 0 || sy >= image.height) break;
+          const size_t q = index(sx, sy);
+          if (mask[q]) continue;
+          const size_t qi = q * 4;
+          for (int c = 0; c < 4; ++c) sum[c] += source[qi + c];
+          ++samples;
+          break;
+        }
+      }
+      if (samples <= 0) continue;
+      const size_t i = p * 4;
+      for (int c = 0; c < 4; ++c)
+        image.rgba[i + c] = static_cast<uint8_t>(sum[c] / samples);
+    }
+  }
+}
+
+} // namespace
 
 PluginHost& PluginHost::instance() {
   static PluginHost h;
@@ -74,6 +177,72 @@ void PluginHost::onDeviceReset() {
   refreshBackbufferSize();
 }
 
+void PluginHost::onBeforeGetRenderTargetData(
+    IDirect3DDevice9* device, IDirect3DSurface9* source) {
+  stagePreOverlaySource(device, source, "GetRenderTargetData");
+}
+
+void PluginHost::onBeforeStretchRect(
+    IDirect3DDevice9* device, IDirect3DSurface9* source, IDirect3DSurface9* destination) {
+  // The plugin itself uses StretchRect for staging/scaling. Those copies occur
+  // while a request is armed too, so they must never become candidates.
+  if (capture_.ownsSurface(source) || capture_.ownsSurface(destination)) return;
+  stagePreOverlaySource(device, source, "StretchRect");
+}
+
+void PluginHost::stagePreOverlaySource(
+    IDirect3DDevice9* device, IDirect3DSurface9* source, const char* operation) {
+  if (!device || !source || device != device_) return;
+  bool needLog = false;
+  {
+    std::lock_guard<std::mutex> lock(redrawMu_);
+    // The first Present after camera edits is deliberately discarded. Its
+    // screen-capture copy is likewise stale and must not become a cubemap face.
+    if (!wantCapture_ || skipCaptures_ > 0) return;
+    needLog = !preOverlayCandidateLogged_;
+  }
+  // Do not recursively capture our own staging/readback surfaces.
+  if (capture_.hasStagedSurface() || capture_.ownsSurface(source)) return;
+
+  D3DSURFACE_DESC desc{};
+  if (FAILED(source->GetDesc(&desc)) || desc.Width == 0 || desc.Height == 0)
+    return;
+
+  // MMD's screen capture is its output-sized color surface. In practice MMD
+  // versions use either GetRenderTargetData or a GPU-only StretchRect here;
+  // both happen before editor overlays. Ignore ray-mmd shadow/G-buffer copies,
+  // which are normally substantially smaller or differently sized than the
+  // presentation backbuffer.
+  if (bbW_ > 0 && bbH_ > 0) {
+    const int toleranceW = (std::max)(32, bbW_ / 8);
+    const int toleranceH = (std::max)(32, bbH_ / 8);
+    if (std::abs(static_cast<int>(desc.Width) - bbW_) > toleranceW ||
+        std::abs(static_cast<int>(desc.Height) - bbH_) > toleranceH) {
+      return;
+    }
+  }
+
+  if (!capture_.stageSurface(source)) return;
+
+  bool logCandidate = false;
+  if (needLog) {
+    std::lock_guard<std::mutex> lock(redrawMu_);
+    if (!preOverlayCandidateLogged_) {
+      preOverlayCandidateLogged_ = true;
+      logCandidate = true;
+    }
+  }
+  if (logCandidate) {
+    char msg[160];
+    std::snprintf(msg, sizeof(msg),
+                  "Pre-overlay source staged from %s: %ux%u fmt=%u",
+                  operation ? operation : "?",
+                  static_cast<unsigned>(desc.Width), static_cast<unsigned>(desc.Height),
+                  static_cast<unsigned>(desc.Format));
+    Diagnostics::instance().info(msg);
+  }
+}
+
 void PluginHost::applyCaptureIsolateFromEnv() {
   const char* env = std::getenv("MMDVR_ISOLATE");
   int level = env ? std::atoi(env) : 0;
@@ -105,6 +274,7 @@ void PluginHost::interruptCaptureWait(const char* reason) {
     std::lock_guard<std::mutex> lock(redrawMu_);
     wantCapture_ = false;
     skipCaptures_ = 0;
+    preOverlayCandidateLogged_ = false;
     pendingCapture_ = {};
     captureReady_ = true; // unblock waiters (empty pending → treat as fail)
     redrawCv_.notify_all();
@@ -116,6 +286,7 @@ void PluginHost::interruptCaptureWait(const char* reason) {
 
 void PluginHost::releaseRenderSession(const char* reason) {
   interruptCaptureWait(reason);
+  const bool isDeviceReset = reason && std::strcmp(reason, "deviceReset") == 0;
   const bool hadTransformOverride =
       controller_.camera().overrideActive() || IsTransformOverrideEnabled();
   controller_.camera().endOverride();
@@ -128,6 +299,13 @@ void PluginHost::releaseRenderSession(const char* reason) {
   mainPassDrawn_ = false;
   didReplaceThisFrame_ = false;
   onMainRt_ = true;
+  // Changing MMD's output size causes a D3D Reset. Do not restore it from
+  // that nested reset callback; restore only when the actual job ends.
+  if (!isDeviceReset && mmdOutputSizeConfigured_) {
+    timeline_.restoreOutputSize();
+    mmdOutputSizeConfigured_ = false;
+  }
+  if (!isDeviceReset) timeline_.restoreScreenCaptureMode();
   char buf[160];
   std::snprintf(buf, sizeof(buf),
                 "releaseRenderSession(%s) overrideHook=%d",
@@ -331,8 +509,20 @@ void PluginHost::onBeforePresent(IDirect3DDevice9* device) {
     capture_.clearCrop();
   }
   ImageBuffer img;
-  bool ok = capture_.captureViewport(img);
+  bool usedPreOverlay = capture_.hasStagedSurface();
+  bool ok = usedPreOverlay ? capture_.captureStaged(img) : capture_.captureViewport(img);
+  if (!ok && usedPreOverlay) {
+    // A driver may reject the staged copy's format. Preserve rendering rather
+    // than failing the face: read the Present backbuffer as the old path did.
+    capture_.clearStagedSurface();
+    usedPreOverlay = false;
+    ok = capture_.captureViewport(img);
+  }
   capture_.clearCrop();
+  capture_.clearStagedSurface();
+  // The fallback contains MMD's editor overlay. The native pre-overlay path
+  // intentionally leaves scene pixels completely untouched.
+  if (ok && !usedPreOverlay) removeMmdCameraTargetMarker(img);
   {
     std::lock_guard<std::mutex> lock(redrawMu_);
     if (ok) pendingCapture_ = std::move(img);
@@ -357,8 +547,26 @@ bool PluginHost::seekAnimationFrame(int frameIndex) {
     Diagnostics::instance().error("seekAnimationFrame: no MMD hwnd");
     return false;
   }
+  const auto settings = controller_.settings();
+  if (settings.cubemapFaces && !mmdOutputSizeConfigured_) {
+    // The final 8K output is equirectangular. Each source cubemap face needs
+    // its own true MMD render target, normally 3072×3072 at the 8K preset;
+    // upscaling an on-screen 1080p viewport only produces soft 8K PNGs.
+    const int faceSize = settings.resolvedFaceSize();
+    if (!timeline_.setOutputSize(faceSize, faceSize)) {
+      Diagnostics::instance().error(
+          "seekAnimationFrame: failed to set MMD output size for cubemap face capture");
+      return false;
+    }
+    mmdOutputSizeConfigured_ = true;
+    refreshBackbufferSize();
+  }
   if (!timeline_.frameEdit() || !IsWindow(timeline_.frameEdit())) {
     if (!timeline_.bind(mmdHwnd_)) return false;
+  }
+  if (!timeline_.enableScreenCaptureMode1()) {
+    Diagnostics::instance().warn(
+        "seekAnimationFrame: MMD screen-capture mode unavailable; using Present fallback");
   }
   if (!timeline_.seekFrame(frameIndex)) return false;
   if (controller_.settings().cubemapFaces) {
@@ -400,11 +608,13 @@ bool PluginHost::captureView(ImageBuffer& out) {
   refreshBackbufferSize();
   controller_.camera().endOverride();
   SetTransformOverrideEnabled(false);
+  capture_.clearStagedSurface();
   {
     std::lock_guard<std::mutex> lock(redrawMu_);
     captureReady_ = false;
     wantCapture_ = true;
     skipCaptures_ = 0;
+    preOverlayCandidateLogged_ = false;
   }
   // One paint nudge only — flooding WM_PAINT re-enters Present under MME.
   if (mmdHwnd_) {
@@ -456,12 +666,14 @@ bool PluginHost::renderView(const CameraState& cam, ImageBuffer& out) {
   didReplaceThisFrame_ = false;
   controller_.camera().endOverride();
   SetTransformOverrideEnabled(false);
+  capture_.clearStagedSurface();
   {
     std::lock_guard<std::mutex> lock(redrawMu_);
     captureReady_ = false;
     wantCapture_ = true;
     skipCaptures_ = 1;
     pendingCam_ = cam;
+    preOverlayCandidateLogged_ = false;
   }
 
   if (controller_.isCancelled()) {
@@ -484,8 +696,8 @@ bool PluginHost::renderView(const CameraState& cam, ImageBuffer& out) {
     skipCaptures_ = 0;
     return false;
   }
-  // Switch only the Camera/Light editor to Light; model selection changes the
-  // active MMD view and breaks subsequent cubemap faces.
+  // Keep Camera selected so native face values apply reliably; the red ◎ is
+  // removed from the captured pixels after Present.
   timeline_.suppressViewportOverlays();
   nativeCameraApplied_ = true;
   if (controller_.isCancelled()) {
@@ -543,12 +755,17 @@ void PluginHost::requestSingleCapture() {
   std::thread([this, hwnd]() {
     capture_.setSquareCrop(false);
     capture_.setDefaultMaxSide(0);
+    if ((!timeline_.frameEdit() || !IsWindow(timeline_.frameEdit())) && hwnd)
+      timeline_.bind(hwnd);
+    timeline_.enableScreenCaptureMode1();
     ImageBuffer img;
+    capture_.clearStagedSurface();
     {
       std::lock_guard<std::mutex> lock(redrawMu_);
       captureReady_ = false;
       wantCapture_ = true;
       skipCaptures_ = 0;
+      preOverlayCandidateLogged_ = false;
     }
     if (hwnd) {
       InvalidateRect(hwnd, nullptr, FALSE);
@@ -569,6 +786,7 @@ void PluginHost::requestSingleCapture() {
       if (ok) img = std::move(pendingCapture_);
     }
     capture_.setSquareCrop(true);
+    timeline_.restoreScreenCaptureMode();
     if (ok && !img.empty()) {
       auto dir = moduleDir() + L"\\mmdvr_captures";
       ImageSequenceWriter w(dir);
@@ -605,10 +823,12 @@ void PluginHost::runCameraProbe() {
     ImageBuffer a, b;
 
     // Baseline also via Present sync (never call D3D from this worker directly).
+    capture_.clearStagedSurface();
     {
       std::lock_guard<std::mutex> lock(redrawMu_);
       captureReady_ = false;
       wantCapture_ = true;
+      preOverlayCandidateLogged_ = false;
     }
     bool baseOk = false;
     {

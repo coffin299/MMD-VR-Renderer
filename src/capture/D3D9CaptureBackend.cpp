@@ -16,10 +16,19 @@ void D3D9CaptureBackend::releasePoolUnlocked() {
   poolFmt_ = D3DFMT_UNKNOWN;
 }
 
+void D3D9CaptureBackend::releaseStagedUnlocked() {
+  if (stagedGpu_) { stagedGpu_->Release(); stagedGpu_ = nullptr; }
+  stagedW_ = stagedH_ = 0;
+  stagedFmt_ = D3DFMT_UNKNOWN;
+  stagedReady_ = false;
+}
+
 void D3D9CaptureBackend::setDevice(IDirect3DDevice9* device) {
   std::lock_guard<std::mutex> lock(mu_);
-  if (device_ != device)
+  if (device_ != device) {
     releasePoolUnlocked();
+    releaseStagedUnlocked();
+  }
   device_ = device;
 }
 
@@ -66,6 +75,7 @@ CaptureIsolate D3D9CaptureBackend::isolate() const {
 void D3D9CaptureBackend::releasePool() {
   std::lock_guard<std::mutex> lock(mu_);
   releasePoolUnlocked();
+  releaseStagedUnlocked();
 }
 
 bool D3D9CaptureBackend::ensurePool(IDirect3DDevice9* dev, int w, int h, D3DFORMAT fmt) {
@@ -100,6 +110,23 @@ bool D3D9CaptureBackend::ensurePool(IDirect3DDevice9* dev, int w, int h, D3DFORM
   return true;
 }
 
+bool D3D9CaptureBackend::ensureStaged(IDirect3DDevice9* dev, int w, int h, D3DFORMAT fmt) {
+  // Caller must hold mu_.
+  if (stagedGpu_ && stagedW_ == w && stagedH_ == h && stagedFmt_ == fmt)
+    return true;
+
+  releaseStagedUnlocked();
+  if (FAILED(dev->CreateRenderTarget(w, h, fmt, D3DMULTISAMPLE_NONE, 0, FALSE,
+                                     &stagedGpu_, nullptr)) || !stagedGpu_) {
+    Diagnostics::instance().error("CreateRenderTarget (pre-overlay stage) failed");
+    return false;
+  }
+  stagedW_ = w;
+  stagedH_ = h;
+  stagedFmt_ = fmt;
+  return true;
+}
+
 static D3DFORMAT pickReadableFormat(D3DFORMAT src) {
   switch (src) {
   case D3DFMT_A8R8G8B8:
@@ -110,6 +137,66 @@ static D3DFORMAT pickReadableFormat(D3DFORMAT src) {
   default:
     return D3DFMT_A8R8G8B8;
   }
+}
+
+bool D3D9CaptureBackend::stageSurface(IDirect3DSurface9* source) {
+  if (!source) return false;
+
+  IDirect3DDevice9* dev = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    dev = device_;
+  }
+  if (!dev) return false;
+
+  D3DSURFACE_DESC desc{};
+  if (FAILED(source->GetDesc(&desc)) || desc.Width == 0 || desc.Height == 0)
+    return false;
+
+  const D3DFORMAT fmt = pickReadableFormat(desc.Format);
+  bool stageOk = false;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    stageOk = ensureStaged(dev, static_cast<int>(desc.Width),
+                           static_cast<int>(desc.Height), fmt);
+  }
+  if (!stageOk) return false;
+
+  IDirect3DSurface9* staged = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    staged = stagedGpu_;
+  }
+  if (!staged) return false;
+
+  const HRESULT hr = dev->StretchRect(source, nullptr, staged, nullptr, D3DTEXF_NONE);
+  if (FAILED(hr)) {
+    char buf[128];
+    std::snprintf(buf, sizeof(buf), "StretchRect pre-overlay stage failed hr=0x%08lX",
+                  static_cast<unsigned long>(hr));
+    Diagnostics::instance().error(buf);
+    clearStagedSurface();
+    return false;
+  }
+
+  std::lock_guard<std::mutex> lock(mu_);
+  stagedReady_ = true;
+  return true;
+}
+
+bool D3D9CaptureBackend::hasStagedSurface() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return stagedReady_ && stagedGpu_;
+}
+
+bool D3D9CaptureBackend::ownsSurface(IDirect3DSurface9* surface) const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return surface && (surface == poolGpu_ || surface == poolSys_ || surface == stagedGpu_);
+}
+
+void D3D9CaptureBackend::clearStagedSurface() {
+  std::lock_guard<std::mutex> lock(mu_);
+  stagedReady_ = false;
 }
 
 bool D3D9CaptureBackend::captureViewport(ImageBuffer& out, int maxSide) {
@@ -315,6 +402,138 @@ bool D3D9CaptureBackend::captureViewport(ImageBuffer& out, int maxSide) {
 
   sys->UnlockRect();
   restoreDeviceBindings();
+  return true;
+}
+
+bool D3D9CaptureBackend::captureStaged(ImageBuffer& out, int maxSide) {
+  IDirect3DDevice9* dev = nullptr;
+  IDirect3DSurface9* staged = nullptr;
+  int stagedW = 0, stagedH = 0;
+  D3DFORMAT stagedFmt = D3DFMT_UNKNOWN;
+  bool crop = false;
+  int cx = 0, cy = 0, cw = 0, ch = 0;
+  int defMax = 0;
+  bool wantSquare = true;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!stagedReady_ || !stagedGpu_ || !device_) return false;
+    dev = device_;
+    staged = stagedGpu_;
+    staged->AddRef();
+    stagedW = stagedW_;
+    stagedH = stagedH_;
+    stagedFmt = stagedFmt_;
+    crop = crop_; cx = cx_; cy = cy_; cw = cw_; ch = ch_;
+    defMax = defaultMaxSide_;
+    wantSquare = squareCrop_;
+  }
+  if (maxSide <= 0) maxSide = defMax;
+
+  int srcX0 = 0, srcY0 = 0, srcW = stagedW, srcH = stagedH;
+  if (crop && cw > 0 && ch > 0) {
+    srcX0 = (std::max)(0, cx);
+    srcY0 = (std::max)(0, cy);
+    srcW = (std::min)(cw, stagedW - srcX0);
+    srcH = (std::min)(ch, stagedH - srcY0);
+  }
+  if (srcW <= 0 || srcH <= 0) {
+    staged->Release();
+    return false;
+  }
+
+  int copyX = srcX0, copyY = srcY0, copyW = srcW, copyH = srcH;
+  if (wantSquare) {
+    const int side = (std::min)(srcW, srcH);
+    copyX = srcX0 + (srcW - side) / 2;
+    copyY = srcY0 + (srcH - side) / 2;
+    copyW = copyH = side;
+  }
+
+  int dstW = copyW, dstH = copyH;
+  if (maxSide > 0) {
+    const int longSide = (std::max)(copyW, copyH);
+    if (longSide > maxSide) {
+      dstW = (std::max)(1, copyW * maxSide / longSide);
+      dstH = (std::max)(1, copyH * maxSide / longSide);
+    }
+  }
+
+  bool poolOk = false;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    poolOk = ensurePool(dev, dstW, dstH, stagedFmt);
+  }
+  if (!poolOk) {
+    staged->Release();
+    return false;
+  }
+
+  IDirect3DSurface9* gpu = nullptr;
+  IDirect3DSurface9* sys = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    gpu = poolGpu_;
+    sys = poolSys_;
+    if (gpu) gpu->AddRef();
+    if (sys) sys->AddRef();
+  }
+  if (!gpu || !sys) {
+    if (gpu) gpu->Release();
+    if (sys) sys->Release();
+    staged->Release();
+    return false;
+  }
+
+  const RECT srcRect{copyX, copyY, copyX + copyW, copyY + copyH};
+  const RECT dstRect{0, 0, dstW, dstH};
+  const D3DTEXTUREFILTERTYPE filter =
+      (dstW != copyW || dstH != copyH) ? D3DTEXF_LINEAR : D3DTEXF_NONE;
+  const HRESULT stretchHr = dev->StretchRect(staged, &srcRect, gpu, &dstRect, filter);
+  staged->Release();
+  if (FAILED(stretchHr)) {
+    char buf[128];
+    std::snprintf(buf, sizeof(buf), "StretchRect staged capture failed hr=0x%08lX",
+                  static_cast<unsigned long>(stretchHr));
+    Diagnostics::instance().error(buf);
+    gpu->Release();
+    sys->Release();
+    return false;
+  }
+
+  const HRESULT readHr = dev->GetRenderTargetData(gpu, sys);
+  gpu->Release();
+  if (FAILED(readHr)) {
+    char buf[128];
+    std::snprintf(buf, sizeof(buf), "GetRenderTargetData staged capture failed hr=0x%08lX",
+                  static_cast<unsigned long>(readHr));
+    Diagnostics::instance().error(buf);
+    sys->Release();
+    return false;
+  }
+
+  D3DLOCKED_RECT lr{};
+  if (FAILED(sys->LockRect(&lr, nullptr, D3DLOCK_READONLY))) {
+    sys->Release();
+    return false;
+  }
+  out.resize(dstW, dstH);
+  const auto* srcBase = static_cast<const uint8_t*>(lr.pBits);
+  for (int y = 0; y < dstH; ++y) {
+    const uint8_t* row = srcBase + y * lr.Pitch;
+    uint8_t* dst = out.rgba.data() + static_cast<size_t>(y) * static_cast<size_t>(dstW) * 4;
+    for (int x = 0; x < dstW; ++x) {
+      const uint8_t b = row[x * 4 + 0];
+      const uint8_t g = row[x * 4 + 1];
+      const uint8_t r = row[x * 4 + 2];
+      const uint8_t a = row[x * 4 + 3];
+      dst[x * 4 + 0] = r;
+      dst[x * 4 + 1] = g;
+      dst[x * 4 + 2] = b;
+      dst[x * 4 + 3] = a ? a : 255;
+    }
+  }
+  sys->UnlockRect();
+  sys->Release();
   return true;
 }
 

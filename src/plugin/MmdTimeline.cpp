@@ -17,7 +17,28 @@ constexpr std::array<int, 7> kCameraEditIds = {
 // Selecting Light hides the red camera target ◎ while retaining the scene view.
 constexpr int kCameraLightTargetComboId = 434;
 constexpr int kCameraTargetSelection = 0;
-constexpr int kLightTargetSelection = 1;
+// 表示(&V) > 出力サイズ(&O), then the dialog's width/height edit controls.
+constexpr int kOutputSizeMenuId = 212;
+constexpr int kOutputWidthEditId = 621;
+constexpr int kOutputHeightEditId = 622;
+// 背景 > スクリーン用キャプチャ. These command IDs are fixed in MMD 9.32.
+constexpr int kScreenCaptureOffMenuId = 243;
+constexpr int kScreenCaptureMode1MenuId = 244;
+constexpr int kScreenCaptureMode3MenuId = 246;
+constexpr int kCoordinateAxisMenuId = 215; // 表示 > 座標軸表示
+
+struct OutputSizeDialogCtx {
+  HWND hwnd = nullptr;
+};
+
+BOOL CALLBACK enumOutputSizeDialog(HWND hwnd, LPARAM lp) {
+  auto* ctx = reinterpret_cast<OutputSizeDialogCtx*>(lp);
+  if (GetDlgItem(hwnd, kOutputWidthEditId) && GetDlgItem(hwnd, kOutputHeightEditId)) {
+    ctx->hwnd = hwnd;
+    return FALSE;
+  }
+  return TRUE;
+}
 
 struct FindCtx {
   HWND best = nullptr;
@@ -68,6 +89,37 @@ OrbitOffset orbitOffset(const MmdCameraUiState& state) {
   v = {v.x * cy + v.z * sy, v.y, -v.x * sy + v.z * cy};
   const double cz = std::cos(roll), sz = std::sin(roll);
   return {v.x * cz + v.y * sz, -v.x * sz + v.y * cz, v.z};
+}
+
+HMENU findMenuContainingCommand(HMENU menu, UINT command) {
+  if (!menu) return nullptr;
+  const int count = GetMenuItemCount(menu);
+  for (int i = 0; i < count; ++i) {
+    if (GetMenuItemID(menu, i) == command) return menu;
+    if (HMENU child = GetSubMenu(menu, i)) {
+      if (HMENU found = findMenuContainingCommand(child, command)) return found;
+    }
+  }
+  return nullptr;
+}
+
+int checkedScreenCaptureCommand(HWND mmdMain) {
+  const HMENU root = GetMenu(mmdMain);
+  for (UINT command = kScreenCaptureOffMenuId; command <= kScreenCaptureMode3MenuId; ++command) {
+    HMENU menu = findMenuContainingCommand(root, command);
+    if (menu && (GetMenuState(menu, command, MF_BYCOMMAND) & MF_CHECKED))
+      return static_cast<int>(command);
+  }
+  return 0;
+}
+
+bool menuCommandChecked(HWND mmdMain, UINT command, bool& checked) {
+  HMENU menu = findMenuContainingCommand(GetMenu(mmdMain), command);
+  if (!menu) return false;
+  const UINT state = GetMenuState(menu, command, MF_BYCOMMAND);
+  if (state == static_cast<UINT>(-1)) return false;
+  checked = (state & MF_CHECKED) != 0;
+  return true;
 }
 
 } // namespace
@@ -305,17 +357,164 @@ bool MmdTimeline::ensureCameraTargetSelected() {
   return selectCameraLightTarget(kCameraTargetSelection);
 }
 
-bool MmdTimeline::suppressViewportOverlays() {
-  if (!mmdMain_ || !IsWindow(mmdMain_)) return false;
-  // Do not select a model here: model selection changes MMD's active view and
-  // caused all cubemap faces after PosZ to render as the frontal shot.
-  if (!selectCameraLightTarget(kLightTargetSelection)) return false;
-  Sleep(20);
-  Diagnostics::instance().info("MmdTimeline: camera target marker suppressed for capture");
+bool MmdTimeline::setOutputSizeInternal(int width, int height, bool saveCurrent) {
+  if (!mmdMain_ || !IsWindow(mmdMain_) || width < 64 || height < 64) return false;
+
+  // The dialog is modal, so post the command then wait for MMD's UI thread to
+  // create it. This function is called from the render worker while the
+  // progress window's message loop keeps MMD responsive.
+  if (!PostMessageW(mmdMain_, WM_COMMAND, static_cast<WPARAM>(kOutputSizeMenuId), 0)) {
+    Diagnostics::instance().error("MmdTimeline: could not open MMD output-size dialog");
+    return false;
+  }
+
+  HWND dialog = nullptr;
+  const DWORD uiThread = GetWindowThreadProcessId(mmdMain_, nullptr);
+  for (int i = 0; i < 100 && !dialog; ++i) {
+    OutputSizeDialogCtx ctx;
+    EnumThreadWindows(uiThread, enumOutputSizeDialog, reinterpret_cast<LPARAM>(&ctx));
+    dialog = ctx.hwnd;
+    if (!dialog) Sleep(20);
+  }
+  if (!dialog) {
+    Diagnostics::instance().error("MmdTimeline: timed out opening MMD output-size dialog");
+    return false;
+  }
+
+  HWND widthEdit = GetDlgItem(dialog, kOutputWidthEditId);
+  HWND heightEdit = GetDlgItem(dialog, kOutputHeightEditId);
+  double oldW = 0.0, oldH = 0.0;
+  if (!widthEdit || !heightEdit || !readDouble(widthEdit, oldW) || !readDouble(heightEdit, oldH)) {
+    PostMessageW(dialog, WM_CLOSE, 0, 0);
+    Diagnostics::instance().error("MmdTimeline: cannot read MMD output-size dialog");
+    return false;
+  }
+  if (saveCurrent && savedOutputWidth_ <= 0 && savedOutputHeight_ <= 0) {
+    savedOutputWidth_ = static_cast<int>(std::lround(oldW));
+    savedOutputHeight_ = static_cast<int>(std::lround(oldH));
+  }
+
+  wchar_t text[32];
+  std::swprintf(text, std::size(text), L"%d", width);
+  if (!SetWindowTextW(widthEdit, text)) {
+    PostMessageW(dialog, WM_CLOSE, 0, 0);
+    return false;
+  }
+  std::swprintf(text, std::size(text), L"%d", height);
+  if (!SetWindowTextW(heightEdit, text)) {
+    PostMessageW(dialog, WM_CLOSE, 0, 0);
+    return false;
+  }
+
+  // IDOK makes MMD recreate its actual output render target, unlike changing
+  // only our CPU projection target.
+  SendMessageW(dialog, WM_COMMAND, IDOK, 0);
+  for (int i = 0; i < 100 && IsWindow(dialog); ++i) Sleep(20);
+  if (IsWindow(dialog)) {
+    PostMessageW(dialog, WM_CLOSE, 0, 0);
+    Diagnostics::instance().error("MmdTimeline: MMD output-size dialog did not close");
+    return false;
+  }
+
+  char msg[160];
+  std::snprintf(msg, sizeof(msg), "MmdTimeline: MMD output size %dx%d", width, height);
+  Diagnostics::instance().info(msg);
+  Sleep(150); // allow D3D Reset / ray-mmd targets to settle
   return true;
 }
 
+bool MmdTimeline::setOutputSize(int width, int height) {
+  return setOutputSizeInternal(width, height, true);
+}
+
+void MmdTimeline::restoreOutputSize() {
+  if (savedOutputWidth_ <= 0 || savedOutputHeight_ <= 0) return;
+  const int width = savedOutputWidth_;
+  const int height = savedOutputHeight_;
+  savedOutputWidth_ = 0;
+  savedOutputHeight_ = 0;
+  if (!setOutputSizeInternal(width, height, false))
+    Diagnostics::instance().warn("MmdTimeline: failed to restore MMD output size");
+}
+
+bool MmdTimeline::enableScreenCaptureMode1() {
+  if (!mmdMain_ || !IsWindow(mmdMain_)) return false;
+  const int current = checkedScreenCaptureCommand(mmdMain_);
+  if (savedScreenCaptureCommand_ < 0) savedScreenCaptureCommand_ = current;
+  if (current == kScreenCaptureMode1MenuId) return true;
+
+  if (!PostMessageW(mmdMain_, WM_COMMAND, static_cast<WPARAM>(kScreenCaptureMode1MenuId), 0)) {
+    Diagnostics::instance().warn("MmdTimeline: could not enable screen-capture mode 1");
+    return false;
+  }
+  Diagnostics::instance().info("MmdTimeline: enabled MMD screen-capture mode 1 for pre-overlay capture");
+  return true;
+}
+
+void MmdTimeline::restoreScreenCaptureMode() {
+  if (savedScreenCaptureCommand_ < 0) return;
+  const int saved = savedScreenCaptureCommand_;
+  savedScreenCaptureCommand_ = -1;
+  if (saved == 0 || !mmdMain_ || !IsWindow(mmdMain_)) return;
+  if (checkedScreenCaptureCommand(mmdMain_) == saved) return;
+  if (!PostMessageW(mmdMain_, WM_COMMAND, static_cast<WPARAM>(saved), 0)) {
+    Diagnostics::instance().warn("MmdTimeline: failed to restore MMD screen-capture mode");
+    return;
+  }
+  Diagnostics::instance().info("MmdTimeline: restored MMD screen-capture mode");
+}
+
+bool MmdTimeline::setCoordinateAxisVisible(bool visible) {
+  if (!mmdMain_ || !IsWindow(mmdMain_)) return false;
+  // The menu command is asynchronous. Once capture has queued the hide, do
+  // not post it again for every cubemap face and accidentally toggle it back.
+  if (!visible && coordinateAxisCaptureHidden_) return true;
+  bool current = false;
+  if (!menuCommandChecked(mmdMain_, kCoordinateAxisMenuId, current)) {
+    Diagnostics::instance().warn("MmdTimeline: MMD coordinate-axis menu not found");
+    return false;
+  }
+  if (savedCoordinateAxisVisible_ < 0)
+    savedCoordinateAxisVisible_ = current ? 1 : 0;
+  if (current == visible) {
+    coordinateAxisCaptureHidden_ = !visible;
+    return true;
+  }
+
+  if (!PostMessageW(mmdMain_, WM_COMMAND, static_cast<WPARAM>(kCoordinateAxisMenuId), 0)) {
+    Diagnostics::instance().warn("MmdTimeline: could not toggle MMD coordinate axes");
+    return false;
+  }
+  Diagnostics::instance().info(visible
+      ? "MmdTimeline: restored MMD coordinate axes for viewport"
+      : "MmdTimeline: disabled MMD coordinate axes for capture");
+  coordinateAxisCaptureHidden_ = !visible;
+  return true;
+}
+
+bool MmdTimeline::suppressViewportOverlays() {
+  if (!mmdMain_ || !IsWindow(mmdMain_)) return false;
+  // MMD 9.32 renders ◎ even with the Light editor selected. Keep Camera
+  // selected so face controls commit reliably; remove ◎ in capture fallback.
+  // Unlike it, the lower-right coordinate gizmo has a supported MMD toggle.
+  const bool axesHidden = setCoordinateAxisVisible(false);
+  Diagnostics::instance().info("MmdTimeline: camera target retained for face capture");
+  return axesHidden;
+}
+
 void MmdTimeline::restoreEditTarget() {
+  if (savedCoordinateAxisVisible_ >= 0 && mmdMain_ && IsWindow(mmdMain_)) {
+    const bool wantVisible = savedCoordinateAxisVisible_ != 0;
+    bool current = false;
+    if (menuCommandChecked(mmdMain_, kCoordinateAxisMenuId, current) &&
+        current != wantVisible &&
+        PostMessageW(mmdMain_, WM_COMMAND, static_cast<WPARAM>(kCoordinateAxisMenuId), 0)) {
+      Diagnostics::instance().info("MmdTimeline: coordinate-axis viewport state restored");
+    }
+    savedCoordinateAxisVisible_ = -1;
+    coordinateAxisCaptureHidden_ = false;
+  }
+
   if (savedCameraLightTarget_ < 0 || !mmdMain_ || !IsWindow(mmdMain_)) return;
   const int saved = savedCameraLightTarget_;
   savedCameraLightTarget_ = -1;
