@@ -1,82 +1,120 @@
 MMD-VR-Renderer CHANGELOG
 =========================
-リリース時はこのファイルの該当セクションを GitHub Release 本文へコピペしてください。
-When releasing, copy the matching section into the GitHub Release body.
+日付式（## YYYY-MM-DD）・日英併記（JA: / EN:）。新しい日付を上に置く。
+Date-based (## YYYY-MM-DD), bilingual JA:/EN: bullets, newest first.
+GitHub Release Full Changelog → this file on the release tag.
 
 
 --------------------------------------------------------------------------------
-[Unreleased]  ← 次のタグ用（作業中の変更をここに追記）
+## 2026-10-29
 --------------------------------------------------------------------------------
 
-## 配布物 / Artifacts
-- `MMD-VR-Renderer-<tag>-win64.zip` — `d3d9.dll` + `d3d9_mmdvr.dll`、導入スクリプト、ドキュメント
-- `MMD-VR-Renderer-Installer-<tag>.exe` — BOOTH 向けインストーラー
+### 追加 / Added
+- JA: JA/EN UI 切替（ダイアログ内の言語ボタン）
+  EN: Japanese/English UI toggle (language buttons in the dialog)
+- JA: エンコーダ選択（既定 libx264 / 自動 / NVENC / QSV / AMF）。FFmpeg が公開する HW を検出
+  EN: Encoder picker (default libx264 / Auto / NVENC / QSV / AMF); probes HW codecs FFmpeg exposes
+- JA: 開始フレーム / 終了フレームを独立行表示
+  EN: Start/end frame fields on separate rows
+- JA: PC スペックからの推奨値オートフィル（日英文言を UI 言語に追従）
+  EN: Auto-fill recommended settings from PC specs (status text follows UI language)
+- JA: レンダー進捗（キャンセル / 一時停止 / ETA）
+  EN: Render progress UI (cancel / pause / ETA)
+- JA: 解像度プリセット 2K〜8K、ワーカースレッド / PNG 書込 / キュー（RAM）調整
+  EN: Resolution presets 2K–8K plus worker / PNG writer / RAM queue controls
+- JA: Release を Actions から手動実行可能（タグ名入力 / draft / prerelease）
+  EN: Manual Release via Actions workflow_dispatch (tag / draft / prerelease)
+- JA: 8K 選択時の容量注意（解像度コンボ・サイズ行・注記、日英）
+  EN: 8K storage warnings in the resolution combo, size line, and notes (JA+EN)
 
-## 導入時のファイル配置（MME と同型）
-- `d3d9.dll`       … MMD が読み込む本体（プロキシ）
-- `d3d9_mmdvr.dll` … 同じ本体の別名コピー（アンインストールの目印）
-- `MMD-VR-Renderer.txt` … 導入マーカー
+### 変更 / Changed
+- JA: 高画質モードの投影・PNG 書き込み・ステレオ左右の重ね処理を高速化（見た目はロスレス維持）
+  EN: Faster High-quality projection, PNG write, and stereo overlap (still lossless visually)
+- JA: キャプチャ用 VRAM: ステージ RT は面ごとに解放、readback プールはフレーム間で再利用
+  EN: Capture VRAM: free staged RTs per face; reuse the readback pool within a frame
+- JA: GitHub Release の Full Changelog はコミット差分ではなく `CHANGELOG.txt` を参照
+  EN: GitHub Release “Full Changelog” links to `CHANGELOG.txt`, not auto commit diffs
+- JA: 同名タグ再実行で既存 Release / Pre-release を上書き（タグ付け替え + 同名アセット置換）
+  EN: Re-running the same tag overwrites existing Release/Pre-release (retag + replace assets)
+- JA: CHANGELOG を版番号ではなく日付見出し（## YYYY-MM-DD）＋日英併記に統一
+  EN: CHANGELOG uses date headings (## YYYY-MM-DD) with bilingual JA/EN bullets
 
-## 変更 / Changes
-### 追加
-- JA/EN UI 切替（ダイアログ内の言語ボタン）
-- エンコーダ選択（既定 libx264 / 自動 / NVENC / QSV / AMF）。FFmpeg が公開する HW を検出
-- 開始フレーム / 終了フレームを独立行表示
-- PC スペックからの推奨値オートフィル
-- レンダー進捗（キャンセル / 一時停止 / ETA）
-- 解像度プリセット 2K〜8K、ワーカースレッド / PNG 書込 / キュー（RAM）調整
+### 修正 / Fixed
+- JA: **CI**: `windows-latest` が VS 2026 のみになり VS2022 ジェネレータ固定で configure 失敗 → CMake 自動検出に変更
+  EN: **CI**: `windows-latest` ships VS 2026 only; stop pinning VS2022 generator — let CMake auto-detect
+- JA: **長時間 8K ジョブの RAM/ディスク**: PNG キュー自動上限、不透明フレームの RGB PNG、クラッシュ後の PNG ギャップ再開
+  EN: **Long 8K jobs RAM/disk**: auto PNG queue cap, opaque RGB PNGs, resume from PNG gaps after crash
+- JA: **巨大フレームの HW エンコード失敗**: H.265(HEVC) 優先プローブとフォールバックダイアログ
+  EN: **HW encode fails on huge frames**: prefer H.265 (HEVC) probe with fallback dialog
+- JA: **キューブマップで ray-mmd が落ちる／Present 待ちタイムアウト**: GetTransform が影用 ortho を壊さないよう透視投影のみ差し替え。面キャプチャ待ち中に再描画を促す。面カメラの near/far は MMD 観測値を優先
+  EN: **ray-mmd crash / Present wait timeout on cubemap**: replace perspective GetTransform only (keep shadow ortho); nudge redraw while waiting; prefer observed MMD near/far for face cameras
+- JA: **レンダリング中だけ ray-mmd が破綻**: 面キャプチャ中はオフスクリーン透視パスも含め VIEW/透視PROJを面カメラで統一。面向きをカメラ前方基準へ。面行列未適用の Present はキャプチャしない
+  EN: **ray-mmd breaks only while rendering**: unify VIEW/perspective PROJ on offscreen passes too; face dirs from camera forward; skip Present until face matrices applied
+- JA: **MP4 に音声 mux**: MMD 読込 WAV を UI 自動検出／手動指定し、開始フレーム位置から AAC で載せる
+  EN: **Audio mux into MP4**: auto-detect or browse MMD WAV; mux AAC from the start-frame offset
+- JA: **YouTube VR メタデータ**: Google Spherical Video UUID を MP4 に注入（VR180 crop / VR360、ステレオ left-right）
+  EN: **YouTube VR metadata**: inject Google Spherical Video UUID (VR180 crop / VR360, stereo left-right)
+- JA: **アニメがフレーム0のまま**: キャプチャ前に MMD フレーム入力欄へシークしてポーズ評価
+  EN: **Animation stuck on frame 0**: seek MMD’s frame edit before capture so pose evaluates
+- JA: 進捗ダイアログが MMD を Disable しないよう変更（シーク／評価を阻害していた）
+  EN: Progress dialog no longer disables MMD (it blocked seek/evaluate)
+- JA: **VR画角**: 既定でキューブマップ面カメラON。メインRT上は VIEW/PROJ を面カメラに統一し GetTransform も一致
+  EN: **VR FOV**: cubemap face cameras ON by default; unify VIEW/PROJ (and GetTransform) on the main RT
+- JA: **ray-mmd 永続破綻の対策**: キャプチャ後／キャンセル時に観測済み VIEW/PROJ を復元し、フック・キャプチャ要求・RTプールを解放
+  EN: **Persistent ray-mmd breakage**: restore observed VIEW/PROJ after capture/cancel; drop hooks, capture requests, RT pool
+- JA: Present 中キャプチャで RT/DS/Viewport/Scissor が変わっていた場合のみ復元
+  EN: After Present capture, restore RT/DS/viewport/scissor only if they changed
+- JA: キャプチャ RT の毎フレーム Create をやめプール化。Present 内 Parallel スレッド生成を廃止
+  EN: Pool capture RTs instead of Create-per-frame; no Parallel thread spawn inside Present
+- JA: `MMDVR_ISOLATE=1..3` でキャプチャ処理を段階無効化できる診断スイッチを追加
+  EN: `MMDVR_ISOLATE=1..3` diagnostic switch to disable capture stages stepwise
+- JA: **既定を「現在カメラのままキャプチャ」に変更**（SetTransform 上書きなし）
+  EN: **Default is live-camera capture** (no SetTransform override)
+- JA: 安全モードは正方形クロップせずビューポート全体をキャプチャ
+  EN: Safe mode captures the full viewport (no square crop)
+- JA: スタブ二重読込をやめ `d3d9.dll`=`d3d9_mmdvr.dll`（同内容）に戻し、MME / VR メニュー未読込を修正
+  EN: Drop stub double-load; `d3d9.dll` equals `d3d9_mmdvr.dll` again so MME / VR menu load
+- JA: Present 後キャプチャは Present スレッドのみ（別スレッド D3D による崩れ・RAM 肥大を抑制）
+  EN: Capture only on the Present thread (avoids off-thread D3D glitches / RAM bloat)
+- JA: 起動時の余分な D3D デバイス作成による CreateDevice 連発・数 GB RAM 食いを削除
+  EN: Remove startup extra D3D device creation (CreateDevice spam / multi-GB RAM)
+- JA: FFmpeg 連番エンコードの `-start_number`（途中再開 PNG の MP4 化失敗を修正）
+  EN: FFmpeg sequence encode uses `-start_number` (fixes MP4 from mid-resume PNGs)
+- JA: UI クリップ（ボタン途切れ）とレイアウト調整
+  EN: Fix clipped UI controls and layout
 
-### 修正
-- **キューブマップで ray-mmd が落ちる／Present 待ちタイムアウト**: GetTransform が影用 ortho を壊さないよう透視投影のみ差し替え。面キャプチャ待ち中に再描画を促す。面カメラの near/far は MMD 観測値を優先
-- **レンダリング中だけ ray-mmd が破綻**: 面キャプチャ中はオフスクリーン透視パスも含め VIEW/透視PROJを面カメラで統一（メインRT限定が G-buffer と SSR で行列割れを起こしていた）。面向きをワールド軸固定からカメラ前方基準へ変更。面行列を一度も適用していない Present はキャプチャしない
-- **MP4 に音声 mux**: MMD 読込 WAV を UI 自動検出／手動指定し、開始フレーム位置から AAC で載せる
-- **YouTube VR メタデータ**: Google Spherical Video UUID を MP4 に注入（VR180 crop / VR360、ステレオ left-right）。単なる ffmpeg -metadata では YouTube が認識しないため差し替え
-- **アニメがフレーム0のまま**だった問題: キャプチャ前に MMD のフレーム入力欄へシークしてポーズ評価（ファイル名だけ進んでいた）
-- 進捗ダイアログが MMD を Disable しないよう変更（シーク／評価を阻害していた）
-- **VR画角**: 既定でキューブマップ面カメラON。メインRT上はフレーム全体で VIEW/PROJ を面カメラに統一し GetTransform も一致（G-bufferとライティングの不一致による破片を抑制）。キャプチャ後／キャンセル時に観測カメラへ復元
-- **ray-mmd 永続破綻の対策**: キャプチャ後／キャンセル時に観測済み VIEW/PROJ をデバイスへ復元し、フック・キャプチャ要求・RTプールを解放
-- Present 中キャプチャで RT/DS/Viewport/Scissor が変わっていた場合のみ復元（無条件全状態セーブはしない）
-- キャプチャの CreateRenderTarget 毎フレーム生成をやめプール化。Present 内での Parallel スレッド生成を廃止
-- `MMDVR_ISOLATE=1..3` でキャプチャ処理を段階無効化できる診断スイッチを追加
-- **既定を「現在カメラのままキャプチャ」に変更**（SetTransform 上書きなし）
-- 安全モードは正方形クロップせずビューポート全体をキャプチャ
-- スタブ経由の二重 DLL 読込をやめ、`d3d9.dll`=`d3d9_mmdvr.dll`（同内容）に戻して MME / VR メニュー未読込を修正
-- Present 後キャプチャ、キャプチャは Present スレッドのみ（別スレッド D3D 呼び出しによる描画崩れ・RAM 肥大を抑制）
-- 起動時の余分な D3D デバイス作成による CreateDevice 連発・数 GB RAM 食いを削除
-- FFmpeg 連番エンコードの `-start_number`（途中再開 PNG の MP4 化失敗を修正）
-- UI クリップ（ボタン途切れ）とレイアウト調整
+### 導入・削除 / Install & uninstall
+- JA: 導入: `tools\install_to_mmd.ps1` または BOOTH インストーラー
+  EN: Install via `tools\install_to_mmd.ps1` or the BOOTH installer
+- JA: 削除: `tools\uninstall_from_mmd.ps1`（`d3d9_mmdvr.dll` を消し、`d3d9_mme.dll` → `d3d9.dll` を復元）
+  EN: Uninstall via `tools\uninstall_from_mmd.ps1` (remove `d3d9_mmdvr.dll`, restore `d3d9_mme.dll` → `d3d9.dll`)
+- JA: 配布 zip/exe。`d3d9.dll`=読込本体、`d3d9_mmdvr.dll`=同内容の目印、`MMD-VR-Renderer.txt`=導入マーカー
+  EN: Ship zip/exe; `d3d9.dll`=loaded proxy, `d3d9_mmdvr.dll`=same-bytes marker, `MMD-VR-Renderer.txt`=install marker
 
-### 導入 / 削除
-- 導入: `tools\install_to_mmd.ps1` または BOOTH インストーラー
-- 削除: `tools\uninstall_from_mmd.ps1`（`d3d9_mmdvr.dll` を消し、`d3d9_mme.dll` → `d3d9.dll` を復元）
+### 既知の制限 / Known limitations
+- JA: ray-mmd の SSR 等はマルチ視点で完全一致しない場合があります
+  EN: ray-mmd SSR and similar effects may not match perfectly across multi-view faces
+- JA: MMD は必ずフォルダ内の `d3d9.dll` を読みます
+  EN: MMD always loads `d3d9.dll` from its own folder
 
-## 不具合報告
+### 不具合報告 / Bug reports
 https://github.com/coffin299/MMD-VR-Renderer/issues
 
 
 --------------------------------------------------------------------------------
-テンプレート（新しいタグを切るとき、上の Unreleased をコピーして日付・版を埋める）
+テンプレート（その日の見出しが無ければファイル上部・既存日付より上に挿入）
 --------------------------------------------------------------------------------
 
-## MMD-VR-Renderer vX.Y.Z — YYYY-MM-DD
+## YYYY-MM-DD
 
-### ハイライト
-- （ユーザー向けに 1〜3 行）
+### 追加 / Added
+- JA:
+  EN:
 
-### 追加
--
+### 変更 / Changed
+- JA:
+  EN:
 
-### 変更
--
-
-### 修正
--
-
-### 既知の制限
-- ray-mmd の SSR 等はマルチ視点で完全一致しない場合があります
-- MMD は必ずフォルダ内の `d3d9.dll` を読みます（スタブ必須）
-
-### 導入
-1. zip を展開
-2. `tools\install_to_mmd.ps1`（MMD フォルダを指定）またはインストーラー exe
-3. `MikuMikuDance.exe` → メニュー **VRレンダラー**
+### 修正 / Fixed
+- JA:
+  EN:

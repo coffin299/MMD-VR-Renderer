@@ -1,0 +1,63 @@
+---
+description: Keep CHANGELOG.txt updated (date-based, JA+EN)
+alwaysApply: true
+---
+
+# CHANGELOG.txt（日付式・日英）
+
+User-facing changes go in repo-root `CHANGELOG.txt` under a **date heading**, newest first. **Every bullet must be bilingual (JA + EN).**
+
+## Format
+
+```text
+## YYYY-MM-DD
+
+### 追加 / Added
+- JA: …
+  EN: …
+
+### 変更 / Changed
+- JA: …
+  EN: …
+
+### 修正 / Fixed
+- JA: …
+  EN: …
+```
+
+- Date = **today in Asia/Tokyo** (`YYYY-MM-DD`). Use the session’s “Today's date” when available.
+- If today’s `## YYYY-MM-DD` exists near the top, **append** there; otherwise **insert** a new block above older dates.
+- No `[Unreleased]`, no `vX.Y.Z` section titles.
+- Subsection titles are always bilingual: `### 追加 / Added`, `### 変更 / Changed`, `### 修正 / Fixed` (add `### 既知の制限 / Known limitations` etc. the same way when needed).
+
+## When to update
+
+Same change set as the code when you:
+
+- Fix a user-visible bug (crash, wrong frames, encode, UI, install)
+- Add/change a feature, default, or release/workflow behavior
+- Meaningfully change performance, RAM/VRAM, or expected disk size
+
+Skip trivial refactors, comments-only, and internal renames with no user-visible effect.
+
+## How to write
+
+- One logical change = one bullet with **both** `JA:` and `EN:` lines (never JA-only or EN-only).
+- Lead with symptom / user benefit; brief cause/fix if useful.
+- Keep EN concise; match the JA meaning (not a machine-dump paraphrase).
+
+## Example
+
+```text
+## 2026-10-29
+
+### 修正 / Fixed
+- JA: **8K ジョブで MMD が落ちる**: キャプチャ RT を面ごとに作り直さず、フレーム間だけ解放
+  EN: **MMD crashes on long 8K jobs**: release capture RTs between frames instead of recreating every face
+
+### 追加 / Added
+- JA: Release を `workflow_dispatch` でタグ手入力公開可能に
+  EN: Release workflow supports manual `workflow_dispatch` with a typed tag
+```
+
+GitHub Release の Full Changelog は `CHANGELOG.txt` へのリンク（コミット比較の自動生成に頼らない）。

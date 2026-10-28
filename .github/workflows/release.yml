@@ -128,7 +128,21 @@ jobs:
           Copy-Item .\dist\booth\MMD-VR-Renderer-Installer.exe `
             ".\dist\MMD-VR-Renderer-Installer-$tag.exe" -Force
 
-      - name: Create GitHub Release
+      # softprops updates an existing Release for the same tag, but does not
+      # move the git tag itself. Force-retarget so re-runs overwrite pre/full releases.
+      - name: Retarget tag to this commit
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ steps.meta.outputs.tag }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f $tag ${{ github.sha }}
+          git push -f origin "refs/tags/$tag"
+          Write-Host "Tag $tag -> ${{ github.sha }} (force)"
+
+      - name: Create / overwrite GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
@@ -136,7 +150,10 @@ jobs:
           name: MMD-VR-Renderer ${{ steps.meta.outputs.tag }}
           draft: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.draft || false }}
           prerelease: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.prerelease || false }}
-          generate_release_notes: true
+          # Full changelog lives in CHANGELOG.txt (not auto commit-diff notes).
+          generate_release_notes: false
+          # Same-name assets on an existing release (incl. pre-release) are replaced.
+          overwrite_files: true
           files: |
             dist/MMD-VR-Renderer-${{ steps.meta.outputs.tag }}-win64.zip
             dist/MMD-VR-Renderer-Installer-${{ steps.meta.outputs.tag }}.exe
@@ -152,7 +169,10 @@ jobs:
 
             または BOOTH インストーラー exe で MMD フォルダを指定 → **導入 / 更新**
 
+            ## Full Changelog
+            See [`CHANGELOG.txt`](https://github.com/${{ github.repository }}/blob/${{ steps.meta.outputs.tag }}/CHANGELOG.txt) in this tag.
+
             ## 不具合報告 / Bug reports
-            https://github.com/coffin299/MMD-VR-Renderer/issues
+            https://github.com/${{ github.repository }}/issues
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
