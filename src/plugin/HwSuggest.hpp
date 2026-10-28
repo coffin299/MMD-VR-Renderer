@@ -85,10 +85,12 @@ inline void queryGpuMemory(unsigned long long& totalMb, unsigned long long& free
 }
 
 inline void applyVramCap(HwSuggest& out) {
-  // Cubemap faces + ray-mmd G-buffers dwarf the equirect itself.
-  // Thresholds are free VRAM (MB), not card size.
-  const unsigned long long v = out.vramFreeMb;
-  if (v == 0) return; // unknown — keep RAM-based pick
+  // Prefer total VRAM for capability; only hard-clamp on critically low free.
+  // 16GB cards (≈15360–16384 MB) can run max face (7680) for 8K — MMD may
+  // already hold several GB, so free≪total must not alone kill the suggestion.
+  const unsigned long long total = out.vramTotalMb;
+  const unsigned long long freeMb = out.vramFreeMb;
+  if (total == 0 && freeMb == 0) return;
 
   auto downgrade = [&](ResolutionPreset res, int face, QualityPreset q) {
     out.resolution = res;
@@ -96,25 +98,50 @@ inline void applyVramCap(HwSuggest& out) {
     out.quality = q;
   };
 
-  if (out.resolution == ResolutionPreset::Res8K && v < 10240) {
-    // Need ~10 GB free for comfortable 8K / face 4096 with MME.
-    if (v >= 6144)
+  // High-end cards: keep / upgrade to max face when capacity allows.
+  if (total >= 15360) {
+    if (out.resolution == ResolutionPreset::Res8K || out.faceSize >= 4096) {
+      if (out.faceSize < 7680) out.faceSize = 7680;
+      out.quality = QualityPreset::High;
+    }
+    // Only bail if almost no headroom left while MMD is already loaded.
+    if (freeMb > 0 && freeMb < 3072) {
+      out.faceSize = (std::min)(out.faceSize, 4096);
+    }
+    if (freeMb > 0 && freeMb < 1536) {
       downgrade(ResolutionPreset::Res4K, 2048, QualityPreset::Balanced);
-    else if (v >= 3072)
+    }
+    return;
+  }
+
+  // 10–15 GB class: 8K / face 4096 OK; don't require 10 GB free.
+  if (total >= 10240) {
+    if (out.resolution == ResolutionPreset::Res8K && out.faceSize < 4096)
+      out.faceSize = 4096;
+    if (freeMb > 0 && freeMb < 2048)
+      downgrade(ResolutionPreset::Res4K, 2048, QualityPreset::Balanced);
+    return;
+  }
+
+  // Smaller GPUs: free VRAM still matters.
+  const unsigned long long v = freeMb > 0 ? freeMb : total;
+  if (out.resolution == ResolutionPreset::Res8K && v < 6144) {
+    if (v >= 4096)
+      downgrade(ResolutionPreset::Res4K, 2048, QualityPreset::Balanced);
+    else if (v >= 2560)
       downgrade(ResolutionPreset::Res3K, 1536, QualityPreset::Balanced);
     else
       downgrade(ResolutionPreset::Res2K, 1024, QualityPreset::Fast);
-  } else if (out.resolution == ResolutionPreset::Res4K && v < 5120) {
-    if (v >= 3072)
+  } else if (out.resolution == ResolutionPreset::Res4K && v < 3072) {
+    if (v >= 2048)
       downgrade(ResolutionPreset::Res3K, 1536, QualityPreset::Balanced);
     else
       downgrade(ResolutionPreset::Res2K, 1024, QualityPreset::Fast);
-  } else if (out.resolution == ResolutionPreset::Res3K && v < 2560) {
+  } else if (out.resolution == ResolutionPreset::Res3K && v < 1536) {
     downgrade(ResolutionPreset::Res2K, 1024, QualityPreset::Fast);
   }
 
-  // Even on high RAM PCs, tiny free VRAM must force light settings.
-  if (v > 0 && v < 2048) {
+  if (freeMb > 0 && freeMb < 1536) {
     out.resolution = ResolutionPreset::Res2K;
     out.faceSize = 1024;
     out.quality = QualityPreset::Fast;
@@ -147,7 +174,16 @@ inline HwSuggest suggestFromThisPc() {
   if (out.ramMb >= 48 && out.logicalCores >= 12) {
     out.quality = QualityPreset::High;
     out.resolution = ResolutionPreset::Res8K;
-    out.faceSize = 4096;
+    // 16GB VRAM → face 7680; otherwise 4096 until applyVramCap upgrades.
+    out.faceSize = (out.vramTotalMb >= 15360) ? 7680 : 4096;
+    out.writeThreads = (std::min)(6, (std::max)(2, out.logicalCores / 4));
+    out.writeQueueMax = 4;
+    tier = tr.hwSuggestHigh;
+  } else if (out.vramTotalMb >= 15360 && out.ramMb >= 32 && out.logicalCores >= 8) {
+    // Strong GPU even if RAM tier is mid-high.
+    out.quality = QualityPreset::High;
+    out.resolution = ResolutionPreset::Res8K;
+    out.faceSize = 7680;
     out.writeThreads = (std::min)(6, (std::max)(2, out.logicalCores / 4));
     out.writeQueueMax = 4;
     tier = tr.hwSuggestHigh;

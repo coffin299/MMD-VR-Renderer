@@ -16,8 +16,8 @@ GitHub Release Full Changelog → this file on the release tag.
   EN: Dialog labels/checkboxes/size line no longer clip — allow 2-line wrap and wider controls
 
 ### 追加 / Added
-- JA: 「このPC向け最適値」が DXGI の空き VRAM も見て解像度／面サイズを抑える
-  EN: “Optimal for this PC” also reads free VRAM via DXGI and caps resolution/face size
+- JA: 「このPC向け最適値」が DXGI の空き／搭載 VRAM を見て提案。VRAM16GB級は面7680まで推奨
+  EN: “Optimal for this PC” uses DXGI free/total VRAM; 16GB-class GPUs get face 7680
 - JA: JA/EN UI 切替（ダイアログ内の言語ボタン）
   EN: Japanese/English UI toggle (language buttons in the dialog)
 - JA: エンコーダ選択（既定 libx264 / 自動 / NVENC / QSV / AMF）。FFmpeg が公開する HW を検出
