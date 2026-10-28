@@ -13,10 +13,12 @@ namespace mmdvr {
 
 // Overlap PNG encode/write with the next frame's GPU/CPU work.
 // writeThreads / queueMax are end-user knobs for RAM/CPU pressure.
+// queueMax<=0 is treated as "no explicit cap" by the caller; RenderController
+// should pass a positive auto-capped value for large VR frames.
 class AsyncImageWriter {
 public:
-  AsyncImageWriter(std::wstring outputDir, int writeThreads = 2, int queueMax = 0)
-      : sync_(std::move(outputDir)), queueMax_(queueMax < 0 ? 0 : queueMax) {
+  AsyncImageWriter(std::wstring outputDir, int writeThreads = 2, int queueMax = 1)
+      : sync_(std::move(outputDir)), queueMax_(queueMax < 1 ? 1 : queueMax) {
     sync_.ensureDir();
     int n = writeThreads < 1 ? 1 : writeThreads;
     workers_.reserve((size_t)n);
@@ -32,16 +34,30 @@ public:
   void enqueue(ImageBuffer&& image, int frameIndex) {
     if (cancel_.load()) return;
     std::unique_lock<std::mutex> lock(mu_);
-    if (queueMax_ > 0) {
-      cvSpace_.wait(lock, [&] {
-        return cancel_.load() || (int)queue_.size() < queueMax_;
-      });
-    }
+    cvSpace_.wait(lock, [&] {
+      return cancel_.load() || (int)queue_.size() < queueMax_;
+    });
     if (cancel_.load()) return;
     queue_.push_back({std::move(image), frameIndex});
     lock.unlock();
     cv_.notify_one();
   }
+
+  // Block until queued+busy jobs <= maxPending (0 = fully drained).
+  void waitUntilPendingAtMost(int maxPending) {
+    if (maxPending < 0) maxPending = 0;
+    std::unique_lock<std::mutex> lock(mu_);
+    cvDone_.wait(lock, [&] {
+      return cancel_.load() || pendingUnlocked() <= maxPending;
+    });
+  }
+
+  int pendingCount() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return pendingUnlocked();
+  }
+
+  int queueMax() const { return queueMax_; }
 
   void cancelPending() {
     cancel_.store(true);
@@ -85,6 +101,10 @@ private:
     int frame = 0;
   };
 
+  int pendingUnlocked() const {
+    return (int)queue_.size() + busy_;
+  }
+
   void loop() {
     for (;;) {
       Job job;
@@ -100,24 +120,29 @@ private:
       cvSpace_.notify_all();
       bool ok = true;
       if (!cancel_.load())
-        ok = sync_.writeFrame(job.image, job.frame);
+        ok = sync_.writeFrame(job.image, job.frame); // may pack RGBA→RGB in-place
+      // Drop pixel RAM as soon as the PNG is on disk.
+      job.image.rgba.clear();
+      job.image.rgba.shrink_to_fit();
+      job.image.width = job.image.height = 0;
       {
         std::lock_guard<std::mutex> lock(mu_);
         if (!ok) failed_.store(true);
         --busy_;
       }
       cvDone_.notify_all();
+      cvSpace_.notify_all();
     }
   }
 
   ImageSequenceWriter sync_;
-  std::mutex mu_;
+  mutable std::mutex mu_;
   std::condition_variable cv_;
   std::condition_variable cvSpace_;
   std::condition_variable cvDone_;
   std::deque<Job> queue_;
   std::vector<std::thread> workers_;
-  int queueMax_ = 0;
+  int queueMax_ = 1;
   bool stop_ = false;
   int busy_ = 0;
   std::atomic<bool> failed_{false};

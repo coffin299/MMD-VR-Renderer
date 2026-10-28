@@ -17,7 +17,59 @@
 #include <thread>
 #include <system_error>
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <Windows.h>
+#endif
+
 namespace mmdvr {
+
+namespace {
+
+size_t estimateComposedRgbaBytes(const RenderSettings& s) {
+  int w = s.outputWidth > 0 ? s.outputWidth : 1;
+  int h = s.outputHeight > 0 ? s.outputHeight : 1;
+  if (s.cubemapFaces && s.stereoMode == StereoMode::Stereo)
+    w *= 2; // side-by-side
+  return static_cast<size_t>(w) * static_cast<size_t>(h) * 4u;
+}
+
+unsigned long long availablePhysMb() {
+#ifdef _WIN32
+  MEMORYSTATUSEX ms{};
+  ms.dwLength = sizeof(ms);
+  if (!GlobalMemoryStatusEx(&ms)) return 0;
+  return ms.ullAvailPhys / (1024ull * 1024ull);
+#else
+  return 0;
+#endif
+}
+
+// Cap PNG queue so pending RGBA frames stay within a fraction of free RAM.
+// 8K stereo SBS ≈ 900MB/frame — unlimited queues are a crash vector.
+int resolvePngQueueMax(const RenderSettings& s) {
+  const size_t frameBytes = estimateComposedRgbaBytes(s);
+  const unsigned long long availMb = availablePhysMb();
+  int byRam = 2;
+  if (frameBytes > 0 && availMb > 0) {
+    // ~10% of currently free RAM for the wait queue (writers hold extra copies).
+    const size_t budget = static_cast<size_t>((availMb * 1024ull * 1024ull) / 10ull);
+    byRam = static_cast<int>(budget / frameBytes);
+  }
+  if (byRam < 1) byRam = 1;
+  if (byRam > 4) byRam = 4;
+  // Very large frames: never queue more than 1 unfinished PNG.
+  if (frameBytes >= 400ull * 1024ull * 1024ull) byRam = 1;
+  else if (frameBytes >= 200ull * 1024ull * 1024ull) byRam = (std::min)(byRam, 2);
+
+  if (s.writeQueueMax > 0)
+    return (std::min)(s.writeQueueMax, byRam);
+  return byRam;
+}
+
+} // namespace
 
 RenderController::RenderController() = default;
 
@@ -227,26 +279,13 @@ ImageBuffer scaleImage(const ImageBuffer& src, int dstW, int dstH, bool bilinear
 
 } // namespace
 
-bool RenderController::renderEye(bool leftEye, ImageBuffer& outEye) {
+bool RenderController::captureCubemapEye(bool leftEye, std::array<ImageBuffer, 6>& faces) {
   if (!redraw_) {
     Diagnostics::instance().error("No redraw backend; cannot multi-view render");
     return false;
   }
   auto s = settings();
-
-  // Default safe path: capture live MMD camera (no SetTransform). ray-mmd OK.
-  if (!s.cubemapFaces) {
-    waitIfPaused();
-    if (cancel_.load()) return false;
-    ImageBuffer live;
-    if (!redraw_->captureView(live)) {
-      Diagnostics::instance().error("captureView failed (safe / live camera)");
-      return false;
-    }
-    const bool bilinear = s.quality != QualityPreset::Fast;
-    outEye = scaleImage(live, s.outputWidth, s.outputHeight, bilinear);
-    return !outEye.empty();
-  }
+  faces = {};
 
   const CameraState base = camera_.snapshot();
   const bool dumpFirstLeftEye = leftEye && !firstFaceDebugDumped_;
@@ -263,8 +302,6 @@ bool RenderController::renderEye(bool leftEye, ImageBuffer& outEye) {
         base.target.x, base.target.y, base.target.z);
     Diagnostics::instance().info(msg);
 
-    // Preserve the actual MMD/ray-mmd frame before replacing its camera.
-    // This lets us distinguish a camera override failure from a stitch issue.
     ImageBuffer live;
     if (redraw_->captureView(live)) {
       if (!faceWriter.writeFrame(live, debugFrame, L"_L_live_mmd_camera"))
@@ -276,7 +313,6 @@ bool RenderController::renderEye(bool leftEye, ImageBuffer& outEye) {
   auto cams = camera_.buildFaceCameras(
       s.vrMode, s.stereoMode, leftEye, s.ipdUnits, s.faceSize, 0.1f, 10000.f);
 
-  std::array<ImageBuffer, 6> faces{};
   std::vector<CubeFace> order;
   if (s.vrMode == VrMode::VR360) {
     order = {CubeFace::PosX, CubeFace::NegX, CubeFace::PosY, CubeFace::NegY, CubeFace::PosZ, CubeFace::NegZ};
@@ -303,6 +339,32 @@ bool RenderController::renderEye(bool leftEye, ImageBuffer& outEye) {
     firstFaceDebugDumped_ = true;
     Diagnostics::instance().info("Saved first left-eye cubemap faces under debug_faces");
   }
+  return true;
+}
+
+bool RenderController::renderEye(bool leftEye, ImageBuffer& outEye) {
+  if (!redraw_) {
+    Diagnostics::instance().error("No redraw backend; cannot multi-view render");
+    return false;
+  }
+  auto s = settings();
+
+  // Default safe path: capture live MMD camera (no SetTransform). ray-mmd OK.
+  if (!s.cubemapFaces) {
+    waitIfPaused();
+    if (cancel_.load()) return false;
+    ImageBuffer live;
+    if (!redraw_->captureView(live)) {
+      Diagnostics::instance().error("captureView failed (safe / live camera)");
+      return false;
+    }
+    const bool bilinear = s.quality != QualityPreset::Fast;
+    outEye = scaleImage(live, s.outputWidth, s.outputHeight, bilinear);
+    return !outEye.empty();
+  }
+
+  std::array<ImageBuffer, 6> faces{};
+  if (!captureCubemapEye(leftEye, faces)) return false;
 
   outEye = composeFromFaces(faces, nullptr, [&]{
     RenderSettings mono = s; mono.stereoMode = StereoMode::Mono; return mono;
@@ -336,31 +398,106 @@ bool RenderController::processAnimationFrame(int frameIndex) {
     if (redraw_) redraw_->restoreSceneCamera();
   };
 
-  ImageBuffer left, right;
-  if (!renderEye(true, left)) {
-    restoreSceneCamera();
-    camera_.restore(saved);
-    camera_.endOverride();
-    return false;
-  }
-  ImageBuffer composed = left;
-  // Stereo eye offset needs cubemap/camera override; safe mode stays mono.
+  ImageBuffer composed;
+  // Stereo High: project left equirect on a worker while capturing right-eye
+  // faces — bilinear 8K compose often rivals several MMD presents.
   if (s.cubemapFaces && s.stereoMode == StereoMode::Stereo) {
-    if (!renderEye(false, right)) {
+    const int facePx = s.resolvedFaceSize();
+    const unsigned long long faceSetMb =
+        (static_cast<unsigned long long>(facePx) * facePx * 4ull * 6ull) /
+        (1024ull * 1024ull);
+    const unsigned long long availMb = availablePhysMb();
+    // Overlap only when holding both face sets briefly still leaves headroom.
+    const bool overlapCompose =
+        availMb == 0 || availMb > faceSetMb * 2ull + 6144ull;
+
+    std::array<ImageBuffer, 6> facesL{};
+    if (!captureCubemapEye(true, facesL)) {
       restoreSceneCamera();
       camera_.restore(saved);
       camera_.endOverride();
       return false;
     }
+
+    ImageBuffer left, right;
+    RenderSettings mono = s;
+    mono.stereoMode = StereoMode::Mono;
+    std::thread projectLeft;
+    if (overlapCompose) {
+      projectLeft = std::thread([&] {
+        left = composeFromFaces(facesL, nullptr, mono);
+        facesL = {};
+      });
+    } else {
+      left = composeFromFaces(facesL, nullptr, mono);
+      facesL = {};
+    }
+
+    std::array<ImageBuffer, 6> facesR{};
+    if (!captureCubemapEye(false, facesR)) {
+      if (projectLeft.joinable()) projectLeft.join();
+      restoreSceneCamera();
+      camera_.restore(saved);
+      camera_.endOverride();
+      return false;
+    }
+
+    restoreSceneCamera();
+    camera_.endOverride();
+    camera_.restore(saved);
+
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      progress_.stage = L"projecting";
+    }
+    if (progressCb_) progressCb_(progress());
+
+    right = composeFromFaces(facesR, nullptr, mono);
+    facesR = {};
+    if (projectLeft.joinable()) projectLeft.join();
+
+    if (left.empty() || right.empty()) {
+      Diagnostics::instance().error("stereo equirect compose failed");
+      return false;
+    }
     composed = StereoEngine::composeSideBySide(left, right);
+    left = {};
+    right = {};
+  } else {
+    ImageBuffer left;
+    if (!renderEye(true, left)) {
+      restoreSceneCamera();
+      camera_.restore(saved);
+      camera_.endOverride();
+      return false;
+    }
+    composed = std::move(left);
+    restoreSceneCamera();
+    camera_.endOverride();
+    camera_.restore(saved);
   }
 
-  restoreSceneCamera();
-  camera_.endOverride();
-  camera_.restore(saved);
-
-  if (!asyncWriter_) asyncWriter_ = std::make_unique<AsyncImageWriter>(s.pngSequenceDir());
+  if (!asyncWriter_) {
+    const int q = resolvePngQueueMax(s);
+    asyncWriter_ = std::make_unique<AsyncImageWriter>(s.pngSequenceDir(), s.writeThreads, q);
+  }
   asyncWriter_->enqueue(std::move(composed), frameIndex);
+  composed = {};
+
+  // Free capture RTs between animation frames (faceSize²×4×2 can be hundreds of MB).
+  if (redraw_) redraw_->trimCaptureResources();
+
+  // Under memory pressure, drain PNG writers before capturing the next frame.
+  const unsigned long long availMb = availablePhysMb();
+  if (asyncWriter_ && availMb > 0 && availMb < 6144) {
+    const int keep = availMb < 3072 ? 0 : 1;
+    asyncWriter_->waitUntilPendingAtMost(keep);
+    if (availMb < 2048) {
+      Diagnostics::instance().warn(
+          "Low free RAM (" + std::to_string((unsigned long long)availMb) +
+          " MB); drained PNG queue before next frame");
+    }
+  }
 
   JobStateData js;
   js.settings = s;
@@ -393,17 +530,26 @@ bool RenderController::start(ProgressCallback cb) {
   auto s = settings();
   Parallel::setThreadLimit(s.workerThreads);
   Parallel::setCancelFlag(&cancel_);
-  asyncWriter_ = std::make_unique<AsyncImageWriter>(s.pngSequenceDir(), s.writeThreads, s.writeQueueMax);
+  const int pngQueue = resolvePngQueueMax(s);
+  asyncWriter_ = std::make_unique<AsyncImageWriter>(s.pngSequenceDir(), s.writeThreads, pngQueue);
+  const size_t frameBytes = estimateComposedRgbaBytes(s);
   Diagnostics::instance().info(
       std::string("mode=") + (s.cubemapFaces ? "cubemap(experimental)" : "live-camera(safe)") +
       " CPU threads=" + std::to_string(Parallel::resolveWorkers()) +
       " face=" + std::to_string(s.faceSize) +
-      " pngWriters=" + std::to_string(std::max(1, s.writeThreads)) +
-      " pngQueue=" + (s.writeQueueMax > 0 ? std::to_string(s.writeQueueMax) : std::string("unlimited")));
+      " pngWriters=" + std::to_string((std::max)(1, s.writeThreads)) +
+      " pngQueue=" + std::to_string(pngQueue) +
+      (s.writeQueueMax > 0 ? " (user cap)" : " (auto RAM cap)") +
+      " frameRGBA≈" + std::to_string(frameBytes / (1024ull * 1024ull)) + "MB" +
+      " freeRAM≈" + std::to_string(availablePhysMb()) + "MB");
   if (s.cubemapFaces && s.faceSize > 4096) {
     Diagnostics::instance().warn(
         "faceSize > 4096 is very heavy on MMD/MME and has caused long-job crashes; "
         "prefer 2048–4096 unless you have verified stability");
+  }
+  if (frameBytes >= 400ull * 1024ull * 1024ull) {
+    Diagnostics::instance().warn(
+        "Composed frame is very large; PNG queue forced to 1 and low-RAM drain is enabled");
   }
 
   int start = s.frameStart;

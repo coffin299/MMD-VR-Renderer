@@ -153,7 +153,8 @@ struct RenderSettings {
   int workerThreads = 0;
   // Parallel PNG writers (each holds a full frame in RAM). End-user chooses how hard to push.
   int writeThreads = 2;
-  // Max pending frames in RAM before backpressure. 0 = unlimited.
+  // Max pending PNG frames in RAM before backpressure.
+  // 0 = auto-cap from free RAM / frame size (never truly unlimited for huge VR frames).
   int writeQueueMax = 0;
 
   void applyResolutionPreset() {

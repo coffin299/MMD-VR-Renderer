@@ -49,7 +49,8 @@ public:
       if (y0 >= y1) break;
       threads.emplace_back([&, y0, y1]() {
         for (int y = y0; y < y1; ++y) {
-          if (cancelled()) return;
+          // Cancel checks are relatively expensive on tight equirect loops.
+          if (((y - y0) & 15) == 0 && cancelled()) return;
           fn(y);
         }
       });

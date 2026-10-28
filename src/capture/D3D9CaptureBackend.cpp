@@ -207,7 +207,9 @@ bool D3D9CaptureBackend::ownsSurface(IDirect3DSurface9* surface) const {
 
 void D3D9CaptureBackend::clearStagedSurface() {
   std::lock_guard<std::mutex> lock(mu_);
-  stagedReady_ = false;
+  // Drop the GPU copy as soon as it is no longer needed — at 8K face size
+  // a single A8R8G8B8 RT is ~235 MB of VRAM.
+  releaseStagedUnlocked();
 }
 
 bool D3D9CaptureBackend::captureViewport(ImageBuffer& out, int maxSide) {

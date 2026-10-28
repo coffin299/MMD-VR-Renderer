@@ -19,21 +19,44 @@ static void sampleNearest(const ImageBuffer& img, float u, float v, uint8_t out[
   readPixel(img, x, y, out);
 }
 
+// Fixed-point bilinear (8.8). Opaque VR faces skip alpha blend — same look, less work.
 static void sampleBilinear(const ImageBuffer& img, float u, float v, uint8_t out[4]) {
   if (img.empty()) { out[0]=out[1]=out[2]=0; out[3]=255; return; }
-  u = u * (img.width - 1);
-  v = v * (img.height - 1);
-  int x0 = (int)std::floor(u), y0 = (int)std::floor(v);
-  int x1 = x0 + 1, y1 = y0 + 1;
-  float fx = u - x0, fy = v - y0;
-  uint8_t c00[4], c10[4], c01[4], c11[4];
-  readPixel(img, x0, y0, c00); readPixel(img, x1, y0, c10);
-  readPixel(img, x0, y1, c01); readPixel(img, x1, y1, c11);
-  for (int k = 0; k < 4; ++k) {
-    float a = c00[k] * (1 - fx) + c10[k] * fx;
-    float b = c01[k] * (1 - fx) + c11[k] * fx;
-    out[k] = (uint8_t)std::round(a * (1 - fy) + b * fy);
+  const int w = img.width;
+  const int h = img.height;
+  float uf = u * (float)(w - 1);
+  float vf = v * (float)(h - 1);
+  int x0 = (int)uf;
+  int y0 = (int)vf;
+  if (x0 < 0) x0 = 0;
+  if (y0 < 0) y0 = 0;
+  if (x0 >= w) x0 = w - 1;
+  if (y0 >= h) y0 = h - 1;
+  int x1 = x0 + 1;
+  int y1 = y0 + 1;
+  if (x1 >= w) x1 = w - 1;
+  if (y1 >= h) y1 = h - 1;
+
+  const int fx = (int)((uf - (float)x0) * 256.f);
+  const int fy = (int)((vf - (float)y0) * 256.f);
+  const int ifx = 256 - fx;
+  const int ify = 256 - fy;
+
+  const uint8_t* p = img.rgba.data();
+  const size_t row = (size_t)w * 4;
+  const uint8_t* r0 = p + (size_t)y0 * row;
+  const uint8_t* r1 = p + (size_t)y1 * row;
+  const uint8_t* c00 = r0 + (size_t)x0 * 4;
+  const uint8_t* c10 = r0 + (size_t)x1 * 4;
+  const uint8_t* c01 = r1 + (size_t)x0 * 4;
+  const uint8_t* c11 = r1 + (size_t)x1 * 4;
+
+  for (int k = 0; k < 3; ++k) {
+    const int a = c00[k] * ifx + c10[k] * fx;
+    const int b = c01[k] * ifx + c11[k] * fx;
+    out[k] = (uint8_t)((a * ify + b * fy + 32768) >> 16);
   }
+  out[3] = 255;
 }
 
 void ProjectionEngine::sampleCubemap(
@@ -57,8 +80,9 @@ void ProjectionEngine::sampleCubemap(
     if (dz > 0) { face = (int)CubeFace::PosZ; sc =  dx; tc = -dy; }
     else        { face = (int)CubeFace::NegZ; sc = -dx; tc = -dy; }
   }
-  float u = 0.5f * (sc / ma + 1.f);
-  float v = 0.5f * (tc / ma + 1.f);
+  const float inv = 0.5f / ma;
+  const float u = sc * inv + 0.5f;
+  const float v = tc * inv + 0.5f;
   if (bilinear) sampleBilinear(faces[face], u, v, outRgba);
   else sampleNearest(faces[face], u, v, outRgba);
 }
@@ -67,21 +91,21 @@ ImageBuffer ProjectionEngine::cubemapToEquirect(
     const std::array<ImageBuffer, 6>& faces, int outW, int outH, bool bilinear) {
   ImageBuffer out; out.resize(outW, outH);
   const float pi = 3.14159265358979323846f;
+  const float invW = 1.f / (float)outW;
+  const float invH = 1.f / (float)outH;
   Parallel::forRows(outH, [&](int y) {
-    float vv = (y + 0.5f) / outH;
+    float vv = (y + 0.5f) * invH;
     float lat = (0.5f - vv) * pi;
     float cosLat = std::cos(lat);
     float sinLat = std::sin(lat);
+    uint8_t* row = out.rgba.data() + (size_t)y * (size_t)outW * 4;
     for (int x = 0; x < outW; ++x) {
-      float uu = (x + 0.5f) / outW;
+      float uu = (x + 0.5f) * invW;
       float lon = (uu - 0.5f) * 2.f * pi;
       float dx = cosLat * std::sin(lon);
       float dy = sinLat;
       float dz = cosLat * std::cos(lon);
-      uint8_t px[4];
-      sampleCubemap(faces, dx, dy, dz, px, bilinear);
-      size_t i = (static_cast<size_t>(y) * outW + x) * 4;
-      out.rgba[i] = px[0]; out.rgba[i+1] = px[1]; out.rgba[i+2] = px[2]; out.rgba[i+3] = px[3];
+      sampleCubemap(faces, dx, dy, dz, row + (size_t)x * 4, bilinear);
     }
   });
   if (Parallel::cancelled()) { out = {}; }
@@ -92,21 +116,21 @@ ImageBuffer ProjectionEngine::cubemapToEquirect180(
     const std::array<ImageBuffer, 6>& faces, int outW, int outH, bool bilinear) {
   ImageBuffer out; out.resize(outW, outH);
   const float pi = 3.14159265358979323846f;
+  const float invW = 1.f / (float)outW;
+  const float invH = 1.f / (float)outH;
   Parallel::forRows(outH, [&](int y) {
-    float vv = (y + 0.5f) / outH;
+    float vv = (y + 0.5f) * invH;
     float lat = (0.5f - vv) * pi;
     float cosLat = std::cos(lat);
     float sinLat = std::sin(lat);
+    uint8_t* row = out.rgba.data() + (size_t)y * (size_t)outW * 4;
     for (int x = 0; x < outW; ++x) {
-      float uu = (x + 0.5f) / outW;
+      float uu = (x + 0.5f) * invW;
       float lon = (uu - 0.5f) * pi;
       float dx = cosLat * std::sin(lon);
       float dy = sinLat;
       float dz = cosLat * std::cos(lon);
-      uint8_t px[4];
-      sampleCubemap(faces, dx, dy, dz, px, bilinear);
-      size_t i = (static_cast<size_t>(y) * outW + x) * 4;
-      out.rgba[i] = px[0]; out.rgba[i+1] = px[1]; out.rgba[i+2] = px[2]; out.rgba[i+3] = px[3];
+      sampleCubemap(faces, dx, dy, dz, row + (size_t)x * 4, bilinear);
     }
   });
   if (Parallel::cancelled()) { out = {}; }

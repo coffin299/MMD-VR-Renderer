@@ -30,6 +30,9 @@ public:
   virtual bool seekAnimationFrame(int frameIndex) = 0;
   // Restore the native MMD camera after all faces for one source frame.
   virtual void restoreSceneCamera() = 0;
+  // Free temporary capture GPU surfaces (and optionally hint the driver to
+  // reclaim managed resources). Safe to call from the job worker after a face.
+  virtual void trimCaptureResources() {}
 };
 
 class RenderController {
@@ -74,6 +77,7 @@ public:
       const RenderSettings& settings);
 
 private:
+  bool captureCubemapEye(bool leftEye, std::array<ImageBuffer, 6>& faces);
   bool renderEye(bool leftEye, ImageBuffer& outEye);
   void applyQualityDefaults(RenderSettings& s);
   void notifyStage(const wchar_t* stage, const std::wstring& note = {});

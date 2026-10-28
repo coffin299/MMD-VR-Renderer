@@ -46,6 +46,7 @@ public:
   bool captureView(ImageBuffer& out) override;
   bool seekAnimationFrame(int frameIndex) override;
   void restoreSceneCamera() override;
+  void trimCaptureResources() override;
 
   // UI-thread safe: drop capture request and wake renderView waiters only.
   void interruptCaptureWait(const char* reason);
@@ -72,6 +73,7 @@ private:
   std::condition_variable redrawCv_;
   bool wantCapture_ = false;
   bool captureReady_ = false;
+  std::atomic<bool> wantEvict_{false};
   bool preOverlayCandidateLogged_ = false;
   ImageBuffer pendingCapture_;
   CameraState pendingCam_{};

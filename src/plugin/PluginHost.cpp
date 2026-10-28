@@ -471,6 +471,8 @@ void PluginHost::onBeforePresent(IDirect3DDevice9* device) {
   }
 
   if (!doCapture) {
+    if (wantEvict_.exchange(false) && device)
+      device->EvictManagedResources();
     if (controller_.camera().overrideActive() || IsTransformOverrideEnabled()) {
       controller_.camera().endOverride();
       SetTransformOverrideEnabled(false);
@@ -537,7 +539,12 @@ void PluginHost::onBeforePresent(IDirect3DDevice9* device) {
     ok = capture_.captureViewport(img);
   }
   capture_.clearCrop();
+  // Free the full-size staged RT (often 100s of MB). Keep the readback pool
+  // so the next face does not re-CreateRenderTarget every Present — that
+  // thrash dominated High-quality face time at 4K/8K.
   capture_.clearStagedSurface();
+  if (wantEvict_.exchange(false) && device)
+    device->EvictManagedResources();
   // The fallback contains MMD's editor overlay. The native pre-overlay path
   // intentionally leaves scene pixels completely untouched.
   if (ok && !usedPreOverlay) removeMmdCameraTargetMarker(img);
@@ -614,6 +621,13 @@ void PluginHost::restoreSceneCamera() {
   }
   timeline_.restoreEditTarget();
   nativeCameraApplied_ = false;
+}
+
+void PluginHost::trimCaptureResources() {
+  // Drop pool between animation frames (not every cubemap face) so High/8K
+  // reuses the same readback RTs within a frame, then returns VRAM to MME.
+  capture_.releasePool();
+  wantEvict_.store(true);
 }
 
 bool PluginHost::captureView(ImageBuffer& out) {

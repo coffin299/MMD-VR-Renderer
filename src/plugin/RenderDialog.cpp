@@ -105,7 +105,7 @@ constexpr int kFaceSizePresetCount =
 constexpr int kWriteThreadPresets[] = {1, 2, 3, 4, 6, 8};
 constexpr int kWriteThreadPresetCount =
     static_cast<int>(sizeof(kWriteThreadPresets) / sizeof(kWriteThreadPresets[0]));
-// 0 = unlimited pending frames in RAM.
+// 0 = auto-cap pending frames from free RAM / frame size.
 constexpr int kWriteQueuePresets[] = {0, 1, 2, 3, 4, 6, 8};
 constexpr int kWriteQueuePresetCount =
     static_cast<int>(sizeof(kWriteQueuePresets) / sizeof(kWriteQueuePresets[0]));
