@@ -24,13 +24,13 @@ constexpr UINT WM_VR_FINISHED = WM_APP + 41;
 constexpr UINT WM_VR_FIT = WM_APP + 42;
 
 constexpr int kClientW = 560;
-constexpr int kClientH = 320;
+constexpr int kClientH = 360;
 constexpr int kMargin = 24;
 constexpr int kContentW = kClientW - kMargin * 2;
 constexpr int kBtnW = 200;
 constexpr int kBtnH = 36;
 constexpr int kBtnGap = 24;
-constexpr int kBtnY = 250;
+constexpr int kBtnY = 290;
 
 struct ProgressUiState {
   RenderController* controller = nullptr;
@@ -54,37 +54,74 @@ static std::wstring formatDuration(double sec) {
   return buf;
 }
 
+static bool isPostFrameStage(const std::wstring& stage) {
+  return stage == L"flushing_png" || stage == L"encoding" || stage == L"vr_meta" ||
+         stage == L"cleanup" || stage == L"done";
+}
+
 static void applyProgress(HWND hWnd, const JobProgress& p) {
   int done = p.completedCount;
   int total = p.totalFrames > 0 ? p.totalFrames : 1;
   int pct = (int)((100.0 * done) / total);
   if (pct > 100) pct = 100;
+  // Keep the bar at 100% during post steps so it doesn't look stuck mid-job.
+  if (isPostFrameStage(p.stage) && !p.cancelled) pct = 100;
   SendDlgItemMessageW(hWnd, IDC_BAR, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
   SendDlgItemMessageW(hWnd, IDC_BAR, PBM_SETPOS, pct, 0);
 
+  const auto& t = ui::t();
   wchar_t status[256];
   if (p.paused) {
-    swprintf(status, 256, L"%s", ui::t().progressPaused);
+    swprintf(status, 256, L"%s", t.progressPaused);
+  } else if (p.stage == L"flushing_png") {
+    swprintf(status, 256, L"%s", t.progressFlushingPng);
   } else if (p.stage == L"encoding") {
-    swprintf(status, 256, L"%s", ui::t().progressEncoding);
+    swprintf(status, 256, L"%s", t.progressEncoding);
+  } else if (p.stage == L"vr_meta") {
+    swprintf(status, 256, L"%s", t.progressVrMeta);
+  } else if (p.stage == L"cleanup") {
+    swprintf(status, 256, L"%s", t.progressCleanup);
   } else if (p.stage == L"done") {
-    swprintf(status, 256, L"%s", ui::t().progressDone);
+    swprintf(status, 256, L"%s", t.progressDone);
   } else if (p.stage == L"cancelled" || p.cancelled) {
-    swprintf(status, 256, L"%s", ui::t().progressCancelled);
+    swprintf(status, 256, L"%s", t.progressCancelled);
+  } else if (p.stage == L"cancelling") {
+    swprintf(status, 256, L"%s", t.progressCancelling);
   } else {
-    swprintf(status, 256, ui::t().progressStatusFmt, done, total, pct);
+    swprintf(status, 256, t.progressStatusFmt, done, total, pct);
   }
   SetDlgItemTextW(hWnd, IDC_STATUS, status);
 
-  wchar_t detail[512];
-  swprintf(detail, 512, ui::t().progressDetailFmt,
-           p.currentFrame,
-           formatDuration(p.elapsedSec).c_str(),
-           p.secPerFrame,
-           formatDuration(p.etaSec).c_str());
+  wchar_t detail[768];
+  if (p.stage == L"flushing_png") {
+    swprintf(detail, 768, t.progressPostDetailFmt,
+             formatDuration(p.elapsedSec).c_str(), t.progressFlushingDetail,
+             p.stageNote.c_str());
+  } else if (p.stage == L"encoding") {
+    swprintf(detail, 768, t.progressPostDetailFmt,
+             formatDuration(p.elapsedSec).c_str(), t.progressEncodingDetail,
+             p.stageNote.c_str());
+  } else if (p.stage == L"vr_meta") {
+    swprintf(detail, 768, t.progressPostDetailFmt,
+             formatDuration(p.elapsedSec).c_str(), t.progressVrMetaDetail,
+             p.stageNote.c_str());
+  } else if (p.stage == L"cleanup") {
+    swprintf(detail, 768, t.progressPostDetailFmt,
+             formatDuration(p.elapsedSec).c_str(), t.progressCleanupDetail,
+             p.stageNote.c_str());
+  } else {
+    swprintf(detail, 768, t.progressDetailFmt,
+             p.currentFrame,
+             formatDuration(p.elapsedSec).c_str(),
+             p.secPerFrame,
+             formatDuration(p.etaSec).c_str());
+  }
   SetDlgItemTextW(hWnd, IDC_DETAIL, detail);
 
-  SetDlgItemTextW(hWnd, IDC_PAUSE, p.paused ? ui::t().btnResume : ui::t().btnPause);
+  SetDlgItemTextW(hWnd, IDC_PAUSE, p.paused ? t.btnResume : t.btnPause);
+  // Post steps aren't pausable; cancel still works until cleanup finishes.
+  const bool post = isPostFrameStage(p.stage) && p.stage != L"done";
+  EnableWindow(GetDlgItem(hWnd, IDC_PAUSE), !post && !p.cancelled);
 }
 
 static LRESULT CALLBACK ProgressWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -95,7 +132,7 @@ static LRESULT CALLBACK ProgressWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPAR
     CreateWindowW(L"STATIC", ui::t().progressTitle, st, kMargin, 16, kContentW, 22, hWnd, (HMENU)IDC_TITLE, 0, 0);
     CreateWindowW(L"STATIC", L"", stMulti, kMargin, 48, kContentW, 40, hWnd, (HMENU)IDC_STATUS, 0, 0);
     CreateWindowExW(0, PROGRESS_CLASSW, L"", st, kMargin, 96, kContentW, 22, hWnd, (HMENU)IDC_BAR, 0, 0);
-    CreateWindowW(L"STATIC", L"", stMulti, kMargin, 130, kContentW, 100, hWnd, (HMENU)IDC_DETAIL, 0, 0);
+    CreateWindowW(L"STATIC", L"", stMulti, kMargin, 130, kContentW, 140, hWnd, (HMENU)IDC_DETAIL, 0, 0);
 
     const int pairW = kBtnW * 2 + kBtnGap;
     const int btnX0 = (kClientW - pairW) / 2;

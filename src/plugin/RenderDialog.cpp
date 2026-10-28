@@ -47,6 +47,7 @@ enum {
   IDC_BROWSE_AUDIO = 1031,
   IDC_LBL_AUDIO = 1032,
   IDC_LBL_AUDIO_HINT = 1033,
+  IDC_PROJECT = 1034,
   IDC_LBL_VRMODE = 1101,
   IDC_LBL_STEREO = 1102,
   IDC_LBL_QUALITY = 1103,
@@ -69,7 +70,8 @@ enum {
   IDC_LBL_PR = 1120,
   IDC_LBL_ENCODE_CODEC = 1121,
   IDC_LBL_FACE_HINT = 1122,
-  IDC_LBL_SAVE_WARN = 1123
+  IDC_LBL_SAVE_WARN = 1123,
+  IDC_LBL_PROJECT = 1124
 };
 
 static RenderSettings* g_settings = nullptr;
@@ -95,7 +97,9 @@ static void refillCombo(HWND hDlg, int id, const wchar_t* const* items, int coun
 }
 
 // Cubemap face edge presets. 0 = auto from resolution/quality.
-constexpr int kFaceSizePresets[] = {0, 512, 1024, 1536, 2048, 3072, 4096};
+// 7680/8192 ≈ 8K face; GPU/D3D9 MaxTexture (often 8192) may still reject the top end.
+constexpr int kFaceSizePresets[] = {
+    0, 512, 1024, 1536, 2048, 3072, 4096, 6144, 7680, 8192};
 constexpr int kFaceSizePresetCount =
     static_cast<int>(sizeof(kFaceSizePresets) / sizeof(kFaceSizePresets[0]));
 constexpr int kWriteThreadPresets[] = {1, 2, 3, 4, 6, 8};
@@ -223,6 +227,7 @@ static void applyLabels(HWND hDlg) {
   setText(hDlg, IDC_LBL_IPD, s.labelIpd);
   setText(hDlg, IDC_LBL_FSTART, s.labelFrameStart);
   setText(hDlg, IDC_LBL_FEND, s.labelFrameEnd);
+  setText(hDlg, IDC_LBL_PROJECT, s.labelProjectName);
   setText(hDlg, IDC_LBL_OUT, s.labelOutDir);
   setText(hDlg, IDC_BROWSE, s.btnBrowse);
   setText(hDlg, IDC_ENCODE, s.chkEncode);
@@ -305,7 +310,12 @@ static INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM) {
     setText(hDlg, IDC_IPD, std::to_wstring(s.ipdUnits));
     setText(hDlg, IDC_FSTART, std::to_wstring(s.frameStart));
     setText(hDlg, IDC_FEND, std::to_wstring(s.frameEnd < 0 ? s.frameStart : s.frameEnd));
-    setText(hDlg, IDC_OUTDIR, s.outputDir);
+    {
+      const std::wstring project =
+          s.jobName.empty() || s.jobName == L"__capture_only__" ? L"mmdvr_job" : s.jobName;
+      setText(hDlg, IDC_PROJECT, project);
+      setText(hDlg, IDC_OUTDIR, parentOutputRoot(s.outputDir, project));
+    }
     CheckDlgButton(hDlg, IDC_ENCODE, s.encodeVideo ? BST_CHECKED : BST_UNCHECKED);
     SendDlgItemMessageW(hDlg, IDC_ENCODE_CODEC, CB_SETCURSEL, (int)s.encodeCodec, 0);
     setText(hDlg, IDC_AUDIO, s.audioPath);
@@ -384,7 +394,8 @@ static INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM) {
       s.ipdUnits = (float)_wtof(getText(hDlg, IDC_IPD).c_str());
       s.frameStart = _wtoi(getText(hDlg, IDC_FSTART).c_str());
       s.frameEnd = _wtoi(getText(hDlg, IDC_FEND).c_str());
-      s.outputDir = getText(hDlg, IDC_OUTDIR);
+      s.jobName = sanitizeProjectName(getText(hDlg, IDC_PROJECT));
+      s.outputDir = joinJobOutputDir(getText(hDlg, IDC_OUTDIR), s.jobName);
       s.encodeVideo = IsDlgButtonChecked(hDlg, IDC_ENCODE) == BST_CHECKED;
       s.audioPath = getText(hDlg, IDC_AUDIO);
       s.cubemapFaces = IsDlgButtonChecked(hDlg, IDC_CUBEMAP) == BST_CHECKED;
@@ -392,7 +403,6 @@ static INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM) {
       if (codecIdx < 0 || codecIdx > (int)EncodeCodec::Amf)
         codecIdx = (int)EncodeCodec::Auto;
       s.encodeCodec = (EncodeCodec)codecIdx;
-      s.jobName = L"mmdvr_job";
       g_ok = true;
       DestroyWindow(hDlg);
       return TRUE;
@@ -420,7 +430,7 @@ bool ShowRenderDialog(HWND owner, RenderSettings& settings) {
   InitCommonControlsEx(&icc);
 
   constexpr int kClientW = 660;
-  constexpr int kClientH = 772;
+  constexpr int kClientH = 800;
   const DWORD style = WS_CAPTION | WS_POPUP | WS_SYSMENU;
   const DWORD exStyle = WS_EX_DLGMODALFRAME;
 
@@ -485,38 +495,41 @@ bool ShowRenderDialog(HWND owner, RenderSettings& settings) {
       CreateWindowW(L"STATIC", L"", st, 300, 286, 150, 20, hWnd, (HMENU)IDC_LBL_FEND, 0, 0);
       CreateWindowW(L"EDIT", L"", st | WS_BORDER, 460, 284, 100, 22, hWnd, (HMENU)IDC_FEND, 0, 0);
 
-      CreateWindowW(L"STATIC", L"", st, 20, 314, 150, 20, hWnd, (HMENU)IDC_LBL_OUT, 0, 0);
-      CreateWindowW(L"EDIT", L"", st | WS_BORDER | ES_AUTOHSCROLL, 180, 312, 400, 22, hWnd, (HMENU)IDC_OUTDIR, 0, 0);
-      CreateWindowW(L"BUTTON", L"...", st, 590, 312, 36, 22, hWnd, (HMENU)IDC_BROWSE, 0, 0);
+      CreateWindowW(L"STATIC", L"", st, 20, 314, 150, 20, hWnd, (HMENU)IDC_LBL_PROJECT, 0, 0);
+      CreateWindowW(L"EDIT", L"", st | WS_BORDER | ES_AUTOHSCROLL, 180, 312, 440, 22, hWnd, (HMENU)IDC_PROJECT, 0, 0);
 
-      CreateWindowW(L"BUTTON", L"", st | BS_AUTOCHECKBOX, 180, 342, 440, 22, hWnd, (HMENU)IDC_ENCODE, 0, 0);
-      CreateWindowW(L"STATIC", L"", st, 20, 370, 150, 20, hWnd, (HMENU)IDC_LBL_ENCODE_CODEC, 0, 0);
-      CreateWindowW(L"COMBOBOX", L"", st | CBS_DROPDOWNLIST, 180, 368, 440, 200, hWnd, (HMENU)IDC_ENCODE_CODEC, 0, 0);
-      CreateWindowW(L"STATIC", L"", st, 20, 398, 150, 20, hWnd, (HMENU)IDC_LBL_AUDIO, 0, 0);
-      CreateWindowW(L"EDIT", L"", st | WS_BORDER | ES_AUTOHSCROLL, 180, 396, 370, 22, hWnd, (HMENU)IDC_AUDIO, 0, 0);
-      CreateWindowW(L"BUTTON", L"...", st, 560, 396, 36, 22, hWnd, (HMENU)IDC_BROWSE_AUDIO, 0, 0);
-      CreateWindowW(L"STATIC", L"", stMulti, 20, 422, 620, 18, hWnd, (HMENU)IDC_LBL_AUDIO_HINT, 0, 0);
-      CreateWindowW(L"BUTTON", L"", st | BS_AUTOCHECKBOX, 180, 444, 440, 22, hWnd, (HMENU)IDC_CUBEMAP, 0, 0);
-      CreateWindowW(L"STATIC", L"", stMulti, 20, 468, 620, 18, hWnd, (HMENU)IDC_LBL_CUBEMAP_HINT, 0, 0);
+      CreateWindowW(L"STATIC", L"", st, 20, 342, 150, 20, hWnd, (HMENU)IDC_LBL_OUT, 0, 0);
+      CreateWindowW(L"EDIT", L"", st | WS_BORDER | ES_AUTOHSCROLL, 180, 340, 400, 22, hWnd, (HMENU)IDC_OUTDIR, 0, 0);
+      CreateWindowW(L"BUTTON", L"...", st, 590, 340, 36, 22, hWnd, (HMENU)IDC_BROWSE, 0, 0);
 
-      HWND autoBtn = CreateWindowW(L"BUTTON", L"", st, 20, 494, 620, 34, hWnd, (HMENU)IDC_AUTOFILL, 0, 0);
+      CreateWindowW(L"BUTTON", L"", st | BS_AUTOCHECKBOX, 180, 370, 440, 22, hWnd, (HMENU)IDC_ENCODE, 0, 0);
+      CreateWindowW(L"STATIC", L"", st, 20, 398, 150, 20, hWnd, (HMENU)IDC_LBL_ENCODE_CODEC, 0, 0);
+      CreateWindowW(L"COMBOBOX", L"", st | CBS_DROPDOWNLIST, 180, 396, 440, 200, hWnd, (HMENU)IDC_ENCODE_CODEC, 0, 0);
+      CreateWindowW(L"STATIC", L"", st, 20, 426, 150, 20, hWnd, (HMENU)IDC_LBL_AUDIO, 0, 0);
+      CreateWindowW(L"EDIT", L"", st | WS_BORDER | ES_AUTOHSCROLL, 180, 424, 370, 22, hWnd, (HMENU)IDC_AUDIO, 0, 0);
+      CreateWindowW(L"BUTTON", L"...", st, 560, 424, 36, 22, hWnd, (HMENU)IDC_BROWSE_AUDIO, 0, 0);
+      CreateWindowW(L"STATIC", L"", stMulti, 20, 450, 620, 18, hWnd, (HMENU)IDC_LBL_AUDIO_HINT, 0, 0);
+      CreateWindowW(L"BUTTON", L"", st | BS_AUTOCHECKBOX, 180, 472, 440, 22, hWnd, (HMENU)IDC_CUBEMAP, 0, 0);
+      CreateWindowW(L"STATIC", L"", stMulti, 20, 496, 620, 18, hWnd, (HMENU)IDC_LBL_CUBEMAP_HINT, 0, 0);
+
+      HWND autoBtn = CreateWindowW(L"BUTTON", L"", st, 20, 522, 620, 34, hWnd, (HMENU)IDC_AUTOFILL, 0, 0);
       SetWindowTheme(autoBtn, L"", L"");
-      CreateWindowW(L"STATIC", L"", stMulti, 20, 532, 620, 20, hWnd, (HMENU)IDC_AUTOFILL_STATUS, 0, 0);
+      CreateWindowW(L"STATIC", L"", stMulti, 20, 560, 620, 20, hWnd, (HMENU)IDC_AUTOFILL_STATUS, 0, 0);
 
-      CreateWindowW(L"BUTTON", L"", st, 20, 560, 190, 36, hWnd, (HMENU)IDC_START, 0, 0);
-      CreateWindowW(L"BUTTON", L"", st, 220, 560, 210, 36, hWnd, (HMENU)IDC_CAPTURE, 0, 0);
-      CreateWindowW(L"BUTTON", L"", st, 440, 560, 200, 36, hWnd, (HMENU)IDC_CANCEL, 0, 0);
+      CreateWindowW(L"BUTTON", L"", st, 20, 588, 190, 36, hWnd, (HMENU)IDC_START, 0, 0);
+      CreateWindowW(L"BUTTON", L"", st, 220, 588, 210, 36, hWnd, (HMENU)IDC_CAPTURE, 0, 0);
+      CreateWindowW(L"BUTTON", L"", st, 440, 588, 200, 36, hWnd, (HMENU)IDC_CANCEL, 0, 0);
 
-      CreateWindowW(L"STATIC", L"", st, 20, 608, 620, 18, hWnd, (HMENU)IDC_LBL_HINT, 0, 0);
-      CreateWindowW(L"STATIC", L"", st, 20, 628, 620, 18, hWnd, (HMENU)IDC_LBL_RESNOTE, 0, 0);
-      CreateWindowW(L"STATIC", L"", st, 20, 654, 140, 18, hWnd, (HMENU)IDC_ISSUES_LEAD, 0, 0);
-      CreateWindowW(WC_LINK, L"", st, 165, 654, 200, 18, hWnd, (HMENU)IDC_ISSUES_LINK, 0, 0);
-      CreateWindowW(L"STATIC", L"", st, 20, 680, 620, 18, hWnd, (HMENU)IDC_LBL_SPEC, 0, 0);
-      CreateWindowW(L"STATIC", L"", st, 20, 702, 620, 18, hWnd, (HMENU)IDC_LBL_PR, 0, 0);
-      CreateWindowW(L"STATIC", L"", st, 20, 728, 620, 22, hWnd, (HMENU)IDC_LBL_SAVE_WARN, 0, 0);
+      CreateWindowW(L"STATIC", L"", st, 20, 636, 620, 18, hWnd, (HMENU)IDC_LBL_HINT, 0, 0);
+      CreateWindowW(L"STATIC", L"", st, 20, 656, 620, 18, hWnd, (HMENU)IDC_LBL_RESNOTE, 0, 0);
+      CreateWindowW(L"STATIC", L"", st, 20, 682, 140, 18, hWnd, (HMENU)IDC_ISSUES_LEAD, 0, 0);
+      CreateWindowW(WC_LINK, L"", st, 165, 682, 200, 18, hWnd, (HMENU)IDC_ISSUES_LINK, 0, 0);
+      CreateWindowW(L"STATIC", L"", st, 20, 708, 620, 18, hWnd, (HMENU)IDC_LBL_SPEC, 0, 0);
+      CreateWindowW(L"STATIC", L"", st, 20, 730, 620, 18, hWnd, (HMENU)IDC_LBL_PR, 0, 0);
+      CreateWindowW(L"STATIC", L"", st, 20, 756, 620, 22, hWnd, (HMENU)IDC_LBL_SAVE_WARN, 0, 0);
 
       DlgProc(hWnd, WM_INITDIALOG, 0, 0);
-      ui_layout::FitClientSize(hWnd, 660, 772);
+      ui_layout::FitClientSize(hWnd, 660, 800);
       return 0;
     }
     if (m == WM_NOTIFY) {

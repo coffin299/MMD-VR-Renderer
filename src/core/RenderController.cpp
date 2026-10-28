@@ -26,6 +26,16 @@ void RenderController::setRedraw(std::shared_ptr<IRedrawRequest> redraw) { redra
 void RenderController::setAbortHandler(std::function<void()> fn) { abortHandler_ = std::move(fn); }
 void RenderController::setCleanupHandler(std::function<void()> fn) { cleanupHandler_ = std::move(fn); }
 
+void RenderController::notifyStage(const wchar_t* stage, const std::wstring& note) {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    progress_.stage = stage ? stage : L"";
+    progress_.stageNote = note;
+    updateTimingLocked(progress_.completedCount);
+  }
+  if (progressCb_) progressCb_(progress());
+}
+
 void RenderController::applyQualityDefaults(RenderSettings& s) {
   // Resolution presets are 2:1 YouTube VR sizes. Face size is user-owned (0 = auto).
   s.applyResolutionPreset();
@@ -65,6 +75,11 @@ bool RenderController::lastEncodeOk() const {
 std::wstring RenderController::lastEncodeError() const {
   std::lock_guard<std::mutex> lock(mu_);
   return lastEncodeError_;
+}
+
+std::wstring RenderController::lastEncodeFallback() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return lastEncodeFallback_;
 }
 
 void RenderController::cancel() {
@@ -344,7 +359,7 @@ bool RenderController::processAnimationFrame(int frameIndex) {
   camera_.endOverride();
   camera_.restore(saved);
 
-  if (!asyncWriter_) asyncWriter_ = std::make_unique<AsyncImageWriter>(s.outputDir);
+  if (!asyncWriter_) asyncWriter_ = std::make_unique<AsyncImageWriter>(s.pngSequenceDir());
   asyncWriter_->enqueue(std::move(composed), frameIndex);
 
   JobStateData js;
@@ -378,7 +393,7 @@ bool RenderController::start(ProgressCallback cb) {
   auto s = settings();
   Parallel::setThreadLimit(s.workerThreads);
   Parallel::setCancelFlag(&cancel_);
-  asyncWriter_ = std::make_unique<AsyncImageWriter>(s.outputDir, s.writeThreads, s.writeQueueMax);
+  asyncWriter_ = std::make_unique<AsyncImageWriter>(s.pngSequenceDir(), s.writeThreads, s.writeQueueMax);
   Diagnostics::instance().info(
       std::string("mode=") + (s.cubemapFaces ? "cubemap(experimental)" : "live-camera(safe)") +
       " CPU threads=" + std::to_string(Parallel::resolveWorkers()) +
@@ -426,6 +441,7 @@ bool RenderController::start(ProgressCallback cb) {
   }
 
   if (asyncWriter_) {
+    notifyStage(L"flushing_png", s.pngSequenceDir());
     if (!asyncWriter_->flush()) {
       ok = false;
       Diagnostics::instance().error("Async PNG write failed");
@@ -438,23 +454,19 @@ bool RenderController::start(ProgressCallback cb) {
     lastOutputMp4_.clear();
     lastEncodeOk_ = false;
     lastEncodeError_.clear();
+    lastEncodeFallback_.clear();
   }
 
   if (ok && !cancel_.load() && s.encodeVideo) {
-    {
-      std::lock_guard<std::mutex> lock(mu_);
-      progress_.stage = L"encoding";
-      updateTimingLocked(progress_.completedCount);
-    }
-    if (progressCb_) progressCb_(progress());
-
     std::wstring err;
+    std::wstring fallback;
     std::wstring mp4 = s.outputDir + L"\\" + s.jobName + L".mp4";
     std::wstring tmp = s.outputDir + L"\\" + s.jobName + L"_raw.mp4";
+    notifyStage(L"encoding", tmp);
     const double audioStartSec =
         (s.fps > 0.0 && s.frameStart > 0) ? (double)s.frameStart / s.fps : 0.0;
-    if (VideoEncoder::encodeSequence(s.outputDir, L"frame_%06d.png", tmp, s.fps, s.ffmpegPath,
-                                     s.encodeCodec, s.audioPath, audioStartSec, &err)) {
+    if (VideoEncoder::encodeSequence(s.pngSequenceDir(), L"frame_%06d.png", tmp, s.fps, s.ffmpegPath,
+                                     s.encodeCodec, s.audioPath, audioStartSec, &err, &fallback)) {
       std::wstring finalOut = mp4;
       // YouTube VR recognition: inject Spherical UUID when we produced equirect (cubemap)
       // or the user left writeSphericalMeta on for a custom pipeline.
@@ -464,6 +476,7 @@ bool RenderController::start(ProgressCallback cb) {
       if (s.cubemapFaces && s.stereoMode == StereoMode::Stereo)
         metaW = s.outputWidth * 2;
       if (wantMeta) {
+        notifyStage(L"vr_meta", finalOut);
         if (!VideoEncoder::injectVrMetadata(tmp, finalOut, s.vrMode, s.stereoMode, metaW, metaH,
                                             s.ffmpegPath, &err)) {
           Diagnostics::instance().warn("VR metadata inject failed; keeping raw mp4");
@@ -483,6 +496,7 @@ bool RenderController::start(ProgressCallback cb) {
         lastOutputMp4_ = finalOut;
         lastEncodeOk_ = true;
         lastEncodeError_.clear();
+        lastEncodeFallback_ = std::move(fallback);
       }
       Diagnostics::instance().infoW(L"MP4 written: " + finalOut);
     } else {
@@ -493,10 +507,11 @@ bool RenderController::start(ProgressCallback cb) {
         lastOutputMp4_ = mp4;
         lastEncodeOk_ = false;
         lastEncodeError_ = err;
+        lastEncodeFallback_ = std::move(fallback);
       }
     }
   } else if (ok && !cancel_.load()) {
-    Diagnostics::instance().infoW(L"PNG sequence in: " + s.outputDir);
+    Diagnostics::instance().infoW(L"PNG sequence in: " + s.pngSequenceDir());
   }
 
   if (asyncWriter_) {
@@ -504,6 +519,7 @@ bool RenderController::start(ProgressCallback cb) {
     asyncWriter_.reset();
   }
   Parallel::setCancelFlag(nullptr);
+  notifyStage(L"cleanup");
   // Full teardown on the job worker only — never from the progress-dialog UI thread.
   if (cleanupHandler_) cleanupHandler_();
 
@@ -519,6 +535,7 @@ bool RenderController::start(ProgressCallback cb) {
     progress_.running = false;
     progress_.paused = false;
     progress_.stage = ok ? L"done" : (cancel_.load() ? L"cancelled" : L"error");
+    progress_.stageNote.clear();
     updateTimingLocked(progress_.completedCount);
   }
   if (progressCb_) progressCb_(progress());

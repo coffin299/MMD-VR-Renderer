@@ -61,6 +61,8 @@ public:
   std::wstring lastOutputMp4() const;
   bool lastEncodeOk() const;
   std::wstring lastEncodeError() const;
+  // Empty unless HW→software (or similar) fallback ran, e.g. L"NVENC → libx264".
+  std::wstring lastEncodeFallback() const;
 
   // Process one animation frame index (multi-view). Used by plugin host loop.
   bool processAnimationFrame(int frameIndex);
@@ -74,6 +76,7 @@ public:
 private:
   bool renderEye(bool leftEye, ImageBuffer& outEye);
   void applyQualityDefaults(RenderSettings& s);
+  void notifyStage(const wchar_t* stage, const std::wstring& note = {});
 
   mutable std::mutex mu_;
   RenderSettings settings_{};
@@ -99,6 +102,7 @@ private:
   std::wstring lastOutputMp4_;
   bool lastEncodeOk_ = false;
   std::wstring lastEncodeError_;
+  std::wstring lastEncodeFallback_;
   // Always save the first left-eye cubemap set for post-mortem inspection.
   // Additional frames require MMDVR_DUMP_FACES=1.
   bool firstFaceDebugDumped_ = false;

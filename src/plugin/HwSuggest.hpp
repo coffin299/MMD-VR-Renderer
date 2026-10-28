@@ -42,11 +42,11 @@ inline HwSuggest suggestFromThisPc() {
   if (out.ramMb >= 48 && out.logicalCores >= 12) {
     out.quality = QualityPreset::High;
     out.resolution = ResolutionPreset::Res8K;
-    out.faceSize = 3072;
+    out.faceSize = 4096;
     out.writeThreads = (std::min)(6, (std::max)(2, out.logicalCores / 4));
     out.writeQueueMax = 4;
-    out.summary = ja ? L"高スペック寄り → 8K / 高画質 / 面3072"
-                     : L"High-end → 8K / High / face 3072";
+    out.summary = ja ? L"高スペック寄り → 8K / 高画質 / 面4096"
+                     : L"High-end → 8K / High / face 4096";
   } else if (out.ramMb >= 24 && out.logicalCores >= 8) {
     out.quality = QualityPreset::Balanced;
     out.resolution = ResolutionPreset::Res4K;

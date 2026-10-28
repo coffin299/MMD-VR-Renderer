@@ -41,6 +41,7 @@ struct Bundle {
   const wchar_t* labelWriteQueue;
   const wchar_t* labelFrameStart;
   const wchar_t* labelFrameEnd;
+  const wchar_t* labelProjectName;
   const wchar_t* labelOutDir;
   const wchar_t* btnBrowse;
   const wchar_t* chkEncode;
@@ -71,11 +72,20 @@ struct Bundle {
   const wchar_t* progressTitle;
   const wchar_t* progressStatusFmt; // done,total,pct
   const wchar_t* progressPaused;
+  const wchar_t* progressFlushingPng;
   const wchar_t* progressEncoding;
+  const wchar_t* progressVrMeta;
+  const wchar_t* progressCleanup;
   const wchar_t* progressDone;
   const wchar_t* progressCancelled;
   const wchar_t* progressCancelling;
   const wchar_t* progressDetailFmt; // frame, elapsed, secPerFrame, eta
+  // Post-frame stages: elapsed, note (may be empty)
+  const wchar_t* progressPostDetailFmt;
+  const wchar_t* progressFlushingDetail;
+  const wchar_t* progressEncodingDetail;
+  const wchar_t* progressVrMetaDetail;
+  const wchar_t* progressCleanupDetail;
   const wchar_t* btnPause;
   const wchar_t* btnResume;
   const wchar_t* btnCancelRender;
@@ -101,6 +111,8 @@ struct Bundle {
   const wchar_t* btnLangJa;
   const wchar_t* btnLangEn;
   const wchar_t* saveBeforeRenderWarn;
+  // %s = e.g. "NVENC → libx264"
+  const wchar_t* encodeFallbackFmt;
 };
 
 const Bundle& t();

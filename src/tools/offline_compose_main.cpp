@@ -53,7 +53,7 @@ int wmain(int argc, wchar_t** argv) {
   s.frameEnd = 0;
 
   ImageBuffer frame = RenderController::composeFromFaces(facesL, stereo == StereoMode::Stereo ? &facesR : nullptr, s);
-  ImageSequenceWriter writer(outDir);
+  ImageSequenceWriter writer(s.pngSequenceDir());
   writer.ensureDir();
   writer.writeFrame(frame, 0);
 
@@ -64,6 +64,6 @@ int wmain(int argc, wchar_t** argv) {
   js.finished = true;
   JobState::save(JobState::defaultPath(outDir), js);
 
-  std::wcout << L"Wrote " << outDir << L"\\frame_000000.png\n";
+  std::wcout << L"Wrote " << s.pngSequenceDir() << L"\\frame_000000.png\n";
   return frame.empty() ? 1 : 0;
 }

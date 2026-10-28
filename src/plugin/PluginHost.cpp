@@ -912,39 +912,53 @@ void PluginHost::startRenderJob(const RenderSettings& settings) {
 
   std::wstring dir = controller_.lastOutputDir();
   std::wstring mp4 = controller_.lastOutputMp4();
-  wchar_t msg[1024];
+  const std::wstring fallback = controller_.lastEncodeFallback();
+  wchar_t fallbackLine[256]{};
+  if (!fallback.empty())
+    std::swprintf(fallbackLine, 256, ui::t().encodeFallbackFmt, fallback.c_str());
+  wchar_t msg[1400];
   if (ok) {
     if (controller_.lastEncodeOk() && !mp4.empty()) {
       if (ui::isJa()) {
-        std::swprintf(msg, 1024,
-                      L"レンダリング完了\n\nMP4:\n%s\n\nPNG連番も同じフォルダです。",
-                      mp4.c_str());
+        std::swprintf(msg, 1400,
+                      L"レンダリング完了\n\nMP4:\n%s\n\nPNG連番も同じフォルダです。%s%s",
+                      mp4.c_str(),
+                      fallback.empty() ? L"" : L"\n\n",
+                      fallback.empty() ? L"" : fallbackLine);
       } else {
-        std::swprintf(msg, 1024,
-                      L"Done.\n\nMP4:\n%s\n\nPNG sequence is in the same folder.",
-                      mp4.c_str());
+        std::swprintf(msg, 1400,
+                      L"Done.\n\nMP4:\n%s\n\nPNG sequence is in the same folder.%s%s",
+                      mp4.c_str(),
+                      fallback.empty() ? L"" : L"\n\n",
+                      fallback.empty() ? L"" : fallbackLine);
       }
     } else if (!dir.empty()) {
       auto encErr = controller_.lastEncodeError();
       if (!encErr.empty()) {
         if (ui::isJa()) {
-          std::swprintf(msg, 1024,
-                        L"PNGは出力済みですが MP4 化に失敗しました。\n\nフォルダ:\n%s\n\nFFmpeg:\n%.500s",
-                        dir.c_str(), encErr.c_str());
+          std::swprintf(msg, 1400,
+                        L"PNGは出力済みですが MP4 化に失敗しました。\n\nフォルダ:\n%s%s%s\n\nFFmpeg:\n%.500s",
+                        dir.c_str(),
+                        fallback.empty() ? L"" : L"\n\n",
+                        fallback.empty() ? L"" : fallbackLine,
+                        encErr.c_str());
         } else {
-          std::swprintf(msg, 1024,
-                        L"PNG written, but MP4 encode failed.\n\nFolder:\n%s\n\nFFmpeg:\n%.500s",
-                        dir.c_str(), encErr.c_str());
+          std::swprintf(msg, 1400,
+                        L"PNG written, but MP4 encode failed.\n\nFolder:\n%s%s%s\n\nFFmpeg:\n%.500s",
+                        dir.c_str(),
+                        fallback.empty() ? L"" : L"\n\n",
+                        fallback.empty() ? L"" : fallbackLine,
+                        encErr.c_str());
         }
       } else {
         if (ui::isJa()) {
-          std::swprintf(msg, 1024, L"レンダリング完了（PNGのみ）。\n\nフォルダ:\n%s", dir.c_str());
+          std::swprintf(msg, 1400, L"レンダリング完了（PNGのみ）。\n\nフォルダ:\n%s", dir.c_str());
         } else {
-          std::swprintf(msg, 1024, L"Done (PNG only).\n\nFolder:\n%s", dir.c_str());
+          std::swprintf(msg, 1400, L"Done (PNG only).\n\nFolder:\n%s", dir.c_str());
         }
       }
     } else {
-      std::swprintf(msg, 1024, L"%s", ui::t().renderDone);
+      std::swprintf(msg, 1400, L"%s", ui::t().renderDone);
     }
     MessageBoxW(hwnd, msg, ui::t().appName, MB_OK);
     if (!dir.empty() &&
