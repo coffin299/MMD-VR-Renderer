@@ -484,8 +484,8 @@ bool PluginHost::renderView(const CameraState& cam, ImageBuffer& out) {
     skipCaptures_ = 0;
     return false;
   }
-  // Keep the camera target selected so MMD applies this face's native controls;
-  // temporarily hide viewport information (including the red look-at ◎).
+  // Switch only the Camera/Light editor to Light; model selection changes the
+  // active MMD view and breaks subsequent cubemap faces.
   timeline_.suppressViewportOverlays();
   nativeCameraApplied_ = true;
   if (controller_.isCancelled()) {

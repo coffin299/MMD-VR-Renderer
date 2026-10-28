@@ -13,8 +13,11 @@ namespace {
 constexpr std::array<int, 7> kCameraEditIds = {
     544, 545, 546, 547, 548, 549, 550}; // X/Y/Z, Rx/Ry/Rz, distance (MMD 9.32 x64)
 
-// 表示(&V) > 情報表示(&D). This also controls the camera target ◎ overlay.
-constexpr int kInformationDisplayMenuId = 211;
+// Camera/Light/Accessory editor target: Camera, Light, Self-shadow, ...
+// Selecting Light hides the red camera target ◎ while retaining the scene view.
+constexpr int kCameraLightTargetComboId = 434;
+constexpr int kCameraTargetSelection = 0;
+constexpr int kLightTargetSelection = 1;
 
 struct FindCtx {
   HWND best = nullptr;
@@ -222,6 +225,7 @@ void MmdTimeline::notifyEditChanged(HWND edit) {
 
 bool MmdTimeline::readCamera(MmdCameraUiState& out) {
   out = {};
+  if (!ensureCameraTargetSelected()) return false;
   if (!bindCameraEdits()) return false;
   std::array<double*, 7> values = {
       &out.x, &out.y, &out.z, &out.rotX, &out.rotY, &out.rotZ, &out.distance};
@@ -237,7 +241,8 @@ bool MmdTimeline::readCamera(MmdCameraUiState& out) {
 }
 
 bool MmdTimeline::applyCamera(const MmdCameraUiState& state) {
-  if (!state.valid || !allFinite(state) || !bindCameraEdits()) return false;
+  if (!state.valid || !allFinite(state) || !ensureCameraTargetSelected() || !bindCameraEdits())
+    return false;
   const std::array<double, 7> values = {
       state.x, state.y, state.z, state.rotX, state.rotY, state.rotZ, state.distance};
   for (size_t i = 0; i < cameraEdits_.size(); ++i) {
@@ -257,58 +262,69 @@ bool MmdTimeline::applyCamera(const MmdCameraUiState& state) {
   return true;
 }
 
-bool MmdTimeline::isInformationDisplayEnabled() const {
-  if (!mmdMain_ || !IsWindow(mmdMain_)) return false;
-  HMENU root = GetMenu(mmdMain_);
-  if (!root) return false;
-  const int topCount = GetMenuItemCount(root);
-  for (int i = 0; i < topCount; ++i) {
-    HMENU sub = GetSubMenu(root, i);
-    if (!sub) continue;
-    const UINT st = GetMenuState(sub, static_cast<UINT>(kInformationDisplayMenuId), MF_BYCOMMAND);
-    if (st == static_cast<UINT>(-1)) continue;
-    return (st & MF_CHECKED) != 0;
-  }
-  return false;
+HWND MmdTimeline::findChildById(HWND root, int id) {
+  if (!root || !IsWindow(root) || id == 0) return nullptr;
+  struct Ctx { int id; HWND found; };
+  Ctx ctx{id, nullptr};
+  EnumChildWindows(
+      root,
+      [](HWND hwnd, LPARAM lp) -> BOOL {
+        auto* c = reinterpret_cast<Ctx*>(lp);
+        if (GetDlgCtrlID(hwnd) == c->id) {
+          c->found = hwnd;
+          return FALSE;
+        }
+        return TRUE;
+      },
+      reinterpret_cast<LPARAM>(&ctx));
+  return ctx.found;
 }
 
-void MmdTimeline::ensureInformationDisplayDisabled() {
-  if (!informationDisplaySaved_) {
-    informationDisplayWasEnabled_ = isInformationDisplayEnabled();
-    informationDisplaySaved_ = true;
+bool MmdTimeline::selectCameraLightTarget(int selection) {
+  HWND combo = findChildById(mmdMain_, kCameraLightTargetComboId);
+  if (!combo) {
+    Diagnostics::instance().error("MmdTimeline: Camera/Light target combo not found");
+    return false;
   }
-  if (isInformationDisplayEnabled()) {
-    SendMessageW(mmdMain_, WM_COMMAND, static_cast<WPARAM>(kInformationDisplayMenuId), 0);
-    Diagnostics::instance().info("MmdTimeline: disabled 情報表示 for cubemap capture");
-  }
+  const int count = static_cast<int>(SendMessageW(combo, CB_GETCOUNT, 0, 0));
+  if (selection < 0 || selection >= count) return false;
+
+  const int current = static_cast<int>(SendMessageW(combo, CB_GETCURSEL, 0, 0));
+  if (savedCameraLightTarget_ < 0) savedCameraLightTarget_ = current;
+  if (current == selection) return true;
+
+  SendMessageW(combo, CB_SETCURSEL, selection, 0);
+  HWND parent = GetParent(combo);
+  const WPARAM wp = MAKEWPARAM(kCameraLightTargetComboId, CBN_SELCHANGE);
+  if (parent) SendMessageW(parent, WM_COMMAND, wp, reinterpret_cast<LPARAM>(combo));
+  SendMessageW(mmdMain_, WM_COMMAND, wp, reinterpret_cast<LPARAM>(combo));
+  return true;
 }
 
-void MmdTimeline::restoreInformationDisplay() {
-  if (!informationDisplaySaved_) return;
-  const bool want = informationDisplayWasEnabled_;
-  informationDisplaySaved_ = false;
-  informationDisplayWasEnabled_ = false;
-  if (!mmdMain_ || !IsWindow(mmdMain_)) return;
-  if (want != isInformationDisplayEnabled()) {
-    SendMessageW(mmdMain_, WM_COMMAND, static_cast<WPARAM>(kInformationDisplayMenuId), 0);
-    Diagnostics::instance().info("MmdTimeline: restored 情報表示");
-  }
+bool MmdTimeline::ensureCameraTargetSelected() {
+  return selectCameraLightTarget(kCameraTargetSelection);
 }
 
 bool MmdTimeline::suppressViewportOverlays() {
   if (!mmdMain_ || !IsWindow(mmdMain_)) return false;
-  // Do not switch the target combo to a model: MMD stops applying the camera
-  // controls while the model target is active, so every following face remains
-  // at the last front-camera render. The information-display menu hides ◎
-  // without changing which controls own the scene camera.
-  ensureInformationDisplayDisabled();
+  // Do not select a model here: model selection changes MMD's active view and
+  // caused all cubemap faces after PosZ to render as the frontal shot.
+  if (!selectCameraLightTarget(kLightTargetSelection)) return false;
   Sleep(20);
-  Diagnostics::instance().info("MmdTimeline: viewport overlays suppressed for capture");
+  Diagnostics::instance().info("MmdTimeline: camera target marker suppressed for capture");
   return true;
 }
 
 void MmdTimeline::restoreEditTarget() {
-  restoreInformationDisplay();
+  if (savedCameraLightTarget_ < 0 || !mmdMain_ || !IsWindow(mmdMain_)) return;
+  const int saved = savedCameraLightTarget_;
+  savedCameraLightTarget_ = -1;
+  if (selectCameraLightTarget(saved)) {
+    // selectCameraLightTarget saves the transient Light selection when no
+    // session value is present; restoration must leave no pending state.
+    savedCameraLightTarget_ = -1;
+    Diagnostics::instance().info("MmdTimeline: Camera/Light target restored");
+  }
 }
 
 bool MmdTimeline::applyCameraFace(
