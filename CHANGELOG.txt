@@ -1,0 +1,82 @@
+MMD-VR-Renderer CHANGELOG
+=========================
+リリース時はこのファイルの該当セクションを GitHub Release 本文へコピペしてください。
+When releasing, copy the matching section into the GitHub Release body.
+
+
+--------------------------------------------------------------------------------
+[Unreleased]  ← 次のタグ用（作業中の変更をここに追記）
+--------------------------------------------------------------------------------
+
+## 配布物 / Artifacts
+- `MMD-VR-Renderer-<tag>-win64.zip` — `d3d9.dll` + `d3d9_mmdvr.dll`、導入スクリプト、ドキュメント
+- `MMD-VR-Renderer-Installer-<tag>.exe` — BOOTH 向けインストーラー
+
+## 導入時のファイル配置（MME と同型）
+- `d3d9.dll`       … MMD が読み込む本体（プロキシ）
+- `d3d9_mmdvr.dll` … 同じ本体の別名コピー（アンインストールの目印）
+- `MMD-VR-Renderer.txt` … 導入マーカー
+
+## 変更 / Changes
+### 追加
+- JA/EN UI 切替（ダイアログ内の言語ボタン）
+- エンコーダ選択（既定 libx264 / 自動 / NVENC / QSV / AMF）。FFmpeg が公開する HW を検出
+- 開始フレーム / 終了フレームを独立行表示
+- PC スペックからの推奨値オートフィル
+- レンダー進捗（キャンセル / 一時停止 / ETA）
+- 解像度プリセット 2K〜8K、ワーカースレッド / PNG 書込 / キュー（RAM）調整
+
+### 修正
+- **キューブマップで ray-mmd が落ちる／Present 待ちタイムアウト**: GetTransform が影用 ortho を壊さないよう透視投影のみ差し替え。面キャプチャ待ち中に再描画を促す。面カメラの near/far は MMD 観測値を優先
+- **レンダリング中だけ ray-mmd が破綻**: 面キャプチャ中はオフスクリーン透視パスも含め VIEW/透視PROJを面カメラで統一（メインRT限定が G-buffer と SSR で行列割れを起こしていた）。面向きをワールド軸固定からカメラ前方基準へ変更。面行列を一度も適用していない Present はキャプチャしない
+- **MP4 に音声 mux**: MMD 読込 WAV を UI 自動検出／手動指定し、開始フレーム位置から AAC で載せる
+- **YouTube VR メタデータ**: Google Spherical Video UUID を MP4 に注入（VR180 crop / VR360、ステレオ left-right）。単なる ffmpeg -metadata では YouTube が認識しないため差し替え
+- **アニメがフレーム0のまま**だった問題: キャプチャ前に MMD のフレーム入力欄へシークしてポーズ評価（ファイル名だけ進んでいた）
+- 進捗ダイアログが MMD を Disable しないよう変更（シーク／評価を阻害していた）
+- **VR画角**: 既定でキューブマップ面カメラON。メインRT上はフレーム全体で VIEW/PROJ を面カメラに統一し GetTransform も一致（G-bufferとライティングの不一致による破片を抑制）。キャプチャ後／キャンセル時に観測カメラへ復元
+- **ray-mmd 永続破綻の対策**: キャプチャ後／キャンセル時に観測済み VIEW/PROJ をデバイスへ復元し、フック・キャプチャ要求・RTプールを解放
+- Present 中キャプチャで RT/DS/Viewport/Scissor が変わっていた場合のみ復元（無条件全状態セーブはしない）
+- キャプチャの CreateRenderTarget 毎フレーム生成をやめプール化。Present 内での Parallel スレッド生成を廃止
+- `MMDVR_ISOLATE=1..3` でキャプチャ処理を段階無効化できる診断スイッチを追加
+- **既定を「現在カメラのままキャプチャ」に変更**（SetTransform 上書きなし）
+- 安全モードは正方形クロップせずビューポート全体をキャプチャ
+- スタブ経由の二重 DLL 読込をやめ、`d3d9.dll`=`d3d9_mmdvr.dll`（同内容）に戻して MME / VR メニュー未読込を修正
+- Present 後キャプチャ、キャプチャは Present スレッドのみ（別スレッド D3D 呼び出しによる描画崩れ・RAM 肥大を抑制）
+- 起動時の余分な D3D デバイス作成による CreateDevice 連発・数 GB RAM 食いを削除
+- FFmpeg 連番エンコードの `-start_number`（途中再開 PNG の MP4 化失敗を修正）
+- UI クリップ（ボタン途切れ）とレイアウト調整
+
+### 導入 / 削除
+- 導入: `tools\install_to_mmd.ps1` または BOOTH インストーラー
+- 削除: `tools\uninstall_from_mmd.ps1`（`d3d9_mmdvr.dll` を消し、`d3d9_mme.dll` → `d3d9.dll` を復元）
+
+## 不具合報告
+https://github.com/coffin299/MMD-VR-Renderer/issues
+
+
+--------------------------------------------------------------------------------
+テンプレート（新しいタグを切るとき、上の Unreleased をコピーして日付・版を埋める）
+--------------------------------------------------------------------------------
+
+## MMD-VR-Renderer vX.Y.Z — YYYY-MM-DD
+
+### ハイライト
+- （ユーザー向けに 1〜3 行）
+
+### 追加
+-
+
+### 変更
+-
+
+### 修正
+-
+
+### 既知の制限
+- ray-mmd の SSR 等はマルチ視点で完全一致しない場合があります
+- MMD は必ずフォルダ内の `d3d9.dll` を読みます（スタブ必須）
+
+### 導入
+1. zip を展開
+2. `tools\install_to_mmd.ps1`（MMD フォルダを指定）またはインストーラー exe
+3. `MikuMikuDance.exe` → メニュー **VRレンダラー**

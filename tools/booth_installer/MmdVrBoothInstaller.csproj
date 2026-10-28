@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon />
+    <AssemblyName>MMD-VR-Renderer-Installer</AssemblyName>
+    <RootNamespace>MmdVrBoothInstaller</RootNamespace>
+    <Version>1.0.0</Version>
+    <Authors>coffin299</Authors>
+    <Product>MMD-VR-Renderer Installer (BOOTH)</Product>
+    <Description>GitHub Releases から最新版を取得して MMD フォルダへ導入・更新します。</Description>
+  </PropertyGroup>
+</Project>

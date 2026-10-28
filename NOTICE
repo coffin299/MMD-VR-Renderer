@@ -1,0 +1,95 @@
+MMD-VR-Renderer — Third-Party Notices
+=====================================
+
+This product includes software developed by third parties.
+The MMD-VR-Renderer project itself is licensed under the MIT License
+(see LICENSE). The following components have their own licenses.
+
+-----------------------------------------------------------------------------
+MinHook
+https://github.com/TsudaKageyu/minhook
+Location: third_party/minhook/
+License: BSD-2-Clause (see third_party/minhook/LICENSE.txt)
+
+Copyright (C) 2009-2017 Tsuda Kageyu.
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+
+ 1. Redistributions of source code must retain the above copyright
+    notice, this list of conditions and the following disclaimer.
+ 2. Redistributions in binary form must reproduce the above copyright
+    notice, this list of conditions and the following disclaimer in the
+    documentation and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER
+OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+Portions (Hacker Disassembler Engine 32/64 C):
+Copyright (c) 2008-2009, Vyacheslav Patkov.
+All rights reserved.
+(Same BSD-2-Clause terms; full text in third_party/minhook/LICENSE.txt)
+
+-----------------------------------------------------------------------------
+stb_image_write.h
+https://github.com/nothings/stb
+Location: third_party/stb/stb_image_write.h
+License: Public Domain / MIT dual license (author: Sean Barrett)
+
+stb_image_write - v1.16 - public domain - http://nothings.org/stb
+writes out PNG/BMP/TGA/JPEG/HDR images to C stdio - Sean Barrett 2010-2015
+no warranty implied; use at your own risk
+
+-----------------------------------------------------------------------------
+nlohmann/json
+https://github.com/nlohmann/json
+Location: third_party/json/nlohmann/json.hpp
+License: MIT
+Version used: 3.11.3
+
+SPDX-FileCopyrightText: 2013-2023 Niels Lohmann <https://nlohmann.me>
+SPDX-License-Identifier: MIT
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+-----------------------------------------------------------------------------
+FFmpeg (optional, external tool)
+https://ffmpeg.org/
+Location when bundled: tools/ffmpeg/ or dist package ffmpeg/
+License: LGPL / GPL depending on the build configuration of the binary you use
+
+FFmpeg is not linked into MMD-VR-Renderer. It is invoked as an external
+process for optional video encoding. Redistribute and use FFmpeg according
+to the license of the specific build you obtain (e.g. gyan.dev essentials).
+
+-----------------------------------------------------------------------------
+Not redistributed / not part of this tree
+- MikuMikuDance, MikuMikuEffect, ray-mmd, and user assets remain under their
+  respective authors' terms. This project does not claim rights to them.

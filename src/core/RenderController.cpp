@@ -1,0 +1,528 @@
+#include "mmdvr/RenderController.hpp"
+#include "mmdvr/ImageSequenceWriter.hpp"
+#include "mmdvr/ProjectionEngine.hpp"
+#include "mmdvr/StereoEngine.hpp"
+#include "mmdvr/VideoEncoder.hpp"
+#include "mmdvr/Diagnostics.hpp"
+#include "mmdvr/MathUtil.hpp"
+#include "mmdvr/Parallel.hpp"
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <string>
+#include <thread>
+#include <system_error>
+
+namespace mmdvr {
+
+RenderController::RenderController() = default;
+
+void RenderController::setCapture(std::shared_ptr<IFrameCapture> capture) { capture_ = std::move(capture); }
+void RenderController::setRedraw(std::shared_ptr<IRedrawRequest> redraw) { redraw_ = std::move(redraw); }
+void RenderController::setAbortHandler(std::function<void()> fn) { abortHandler_ = std::move(fn); }
+
+void RenderController::applyQualityDefaults(RenderSettings& s) {
+  // Resolution presets are 2:1 YouTube VR sizes. Face size is user-owned (0 = auto).
+  s.applyResolutionPreset();
+}
+
+void RenderController::setSettings(const RenderSettings& s) {
+  std::lock_guard<std::mutex> lock(mu_);
+  settings_ = s;
+  applyQualityDefaults(settings_);
+}
+
+RenderSettings RenderController::settings() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return settings_;
+}
+
+JobProgress RenderController::progress() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return progress_;
+}
+
+std::wstring RenderController::lastOutputDir() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return lastOutputDir_;
+}
+
+std::wstring RenderController::lastOutputMp4() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return lastOutputMp4_;
+}
+
+bool RenderController::lastEncodeOk() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return lastEncodeOk_;
+}
+
+std::wstring RenderController::lastEncodeError() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return lastEncodeError_;
+}
+
+void RenderController::cancel() {
+  cancel_.store(true);
+  paused_.store(false);
+  if (asyncWriter_) asyncWriter_->cancelPending();
+  if (abortHandler_) abortHandler_();
+  std::lock_guard<std::mutex> lock(mu_);
+  progress_.cancelled = true;
+  progress_.paused = false;
+  progress_.stage = L"cancelling";
+}
+
+void RenderController::pause() {
+  if (!running_.load() || cancel_.load()) return;
+  if (paused_.exchange(true)) return;
+  std::lock_guard<std::mutex> lock(mu_);
+  pauseBegan_ = std::chrono::steady_clock::now();
+  pauseClockRunning_ = true;
+  progress_.paused = true;
+  progress_.stage = L"paused";
+}
+
+void RenderController::resume() {
+  if (!paused_.exchange(false)) return;
+  std::lock_guard<std::mutex> lock(mu_);
+  if (pauseClockRunning_) {
+    auto now = std::chrono::steady_clock::now();
+    pausedAccumSec_ += std::chrono::duration<double>(now - pauseBegan_).count();
+    pauseClockRunning_ = false;
+  }
+  progress_.paused = false;
+  progress_.stage = L"rendering";
+}
+
+void RenderController::waitIfPaused() {
+  while (paused_.load() && !cancel_.load()) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+}
+
+void RenderController::updateTimingLocked(int completedCount) {
+  auto now = std::chrono::steady_clock::now();
+  double pauseExtra = pausedAccumSec_;
+  if (pauseClockRunning_) {
+    pauseExtra += std::chrono::duration<double>(now - pauseBegan_).count();
+  }
+  double elapsed = std::chrono::duration<double>(now - runStart_).count() - pauseExtra;
+  if (elapsed < 0) elapsed = 0;
+  progress_.elapsedSec = elapsed;
+  progress_.completedCount = completedCount;
+  if (completedCount > 0) {
+    progress_.secPerFrame = elapsed / completedCount;
+    int remaining = progress_.totalFrames - completedCount;
+    if (remaining < 0) remaining = 0;
+    progress_.etaSec = progress_.secPerFrame * remaining;
+  } else {
+    progress_.secPerFrame = 0;
+    progress_.etaSec = -1;
+  }
+}
+
+ImageBuffer RenderController::composeFromFaces(
+    const std::array<ImageBuffer, 6>& leftFaces,
+    const std::array<ImageBuffer, 6>* rightFaces,
+    const RenderSettings& settings) {
+  const bool bilinear = settings.quality != QualityPreset::Fast;
+
+  auto project = [&](const std::array<ImageBuffer, 6>& faces) {
+    if (settings.vrMode == VrMode::VR360)
+      return ProjectionEngine::cubemapToEquirect(faces, settings.outputWidth, settings.outputHeight, bilinear);
+    return ProjectionEngine::cubemapToEquirect180(faces, settings.outputWidth, settings.outputHeight, bilinear);
+  };
+
+  if (settings.stereoMode == StereoMode::Mono || !rightFaces)
+    return project(leftFaces);
+
+  // Burn both eyes on CPU in parallel (each already multi-threaded by rows).
+  ImageBuffer leftEq, rightEq;
+  std::thread t([&] { leftEq = project(leftFaces); });
+  rightEq = project(*rightFaces);
+  t.join();
+  return StereoEngine::composeSideBySide(leftEq, rightEq);
+}
+
+namespace {
+
+const wchar_t* cubeFaceName(CubeFace face) {
+  switch (face) {
+  case CubeFace::PosX: return L"posx";
+  case CubeFace::NegX: return L"negx";
+  case CubeFace::PosY: return L"posy";
+  case CubeFace::NegY: return L"negy";
+  case CubeFace::PosZ: return L"posz";
+  case CubeFace::NegZ: return L"negz";
+  default: return L"unknown";
+  }
+}
+
+bool dumpFacesEnabled() {
+  const char* value = std::getenv("MMDVR_DUMP_FACES");
+  return value && value[0] != '\0' && value[0] != '0';
+}
+
+ImageBuffer scaleImage(const ImageBuffer& src, int dstW, int dstH, bool bilinear) {
+  ImageBuffer out;
+  if (src.empty() || dstW <= 0 || dstH <= 0) return out;
+  out.resize(dstW, dstH);
+  if (src.width == dstW && src.height == dstH) {
+    out.rgba = src.rgba;
+    return out;
+  }
+  for (int y = 0; y < dstH; ++y) {
+    for (int x = 0; x < dstW; ++x) {
+      float u = ((float)x + 0.5f) * (float)src.width / (float)dstW - 0.5f;
+      float v = ((float)y + 0.5f) * (float)src.height / (float)dstH - 0.5f;
+      uint8_t* dst = out.rgba.data() + ((size_t)y * (size_t)dstW + (size_t)x) * 4;
+      if (!bilinear) {
+        int ix = (std::max)(0, (std::min)(src.width - 1, (int)std::lround(u)));
+        int iy = (std::max)(0, (std::min)(src.height - 1, (int)std::lround(v)));
+        const uint8_t* p = src.rgba.data() + ((size_t)iy * (size_t)src.width + (size_t)ix) * 4;
+        dst[0] = p[0]; dst[1] = p[1]; dst[2] = p[2]; dst[3] = p[3];
+        continue;
+      }
+      int x0 = (int)std::floor(u), y0 = (int)std::floor(v);
+      float fx = u - (float)x0, fy = v - (float)y0;
+      auto sample = [&](int sx, int sy) -> const uint8_t* {
+        sx = (std::max)(0, (std::min)(src.width - 1, sx));
+        sy = (std::max)(0, (std::min)(src.height - 1, sy));
+        return src.rgba.data() + ((size_t)sy * (size_t)src.width + (size_t)sx) * 4;
+      };
+      const uint8_t* p00 = sample(x0, y0);
+      const uint8_t* p10 = sample(x0 + 1, y0);
+      const uint8_t* p01 = sample(x0, y0 + 1);
+      const uint8_t* p11 = sample(x0 + 1, y0 + 1);
+      for (int c = 0; c < 4; ++c) {
+        float a = p00[c] * (1.f - fx) + p10[c] * fx;
+        float b = p01[c] * (1.f - fx) + p11[c] * fx;
+        dst[c] = (uint8_t)std::lround(a * (1.f - fy) + b * fy);
+      }
+    }
+  }
+  return out;
+}
+
+} // namespace
+
+bool RenderController::renderEye(bool leftEye, ImageBuffer& outEye) {
+  if (!redraw_) {
+    Diagnostics::instance().error("No redraw backend; cannot multi-view render");
+    return false;
+  }
+  auto s = settings();
+
+  // Default safe path: capture live MMD camera (no SetTransform). ray-mmd OK.
+  if (!s.cubemapFaces) {
+    waitIfPaused();
+    if (cancel_.load()) return false;
+    ImageBuffer live;
+    if (!redraw_->captureView(live)) {
+      Diagnostics::instance().error("captureView failed (safe / live camera)");
+      return false;
+    }
+    const bool bilinear = s.quality != QualityPreset::Fast;
+    outEye = scaleImage(live, s.outputWidth, s.outputHeight, bilinear);
+    return !outEye.empty();
+  }
+
+  const CameraState base = camera_.snapshot();
+  const bool dumpFirstLeftEye = leftEye && !firstFaceDebugDumped_;
+  const bool dumpFaces = dumpFacesEnabled() || dumpFirstLeftEye;
+  ImageSequenceWriter faceWriter(s.outputDir + L"\\debug_faces");
+  const int debugFrame = progress().currentFrame;
+  if (dumpFirstLeftEye) {
+    char msg[256];
+    std::snprintf(
+        msg, sizeof(msg),
+        "Cubemap base camera: valid=%d eye=(%.3f,%.3f,%.3f) target=(%.3f,%.3f,%.3f)",
+        base.valid ? 1 : 0,
+        base.eye.x, base.eye.y, base.eye.z,
+        base.target.x, base.target.y, base.target.z);
+    Diagnostics::instance().info(msg);
+
+    // Preserve the actual MMD/ray-mmd frame before replacing its camera.
+    // This lets us distinguish a camera override failure from a stitch issue.
+    ImageBuffer live;
+    if (redraw_->captureView(live)) {
+      if (!faceWriter.writeFrame(live, debugFrame, L"_L_live_mmd_camera"))
+        Diagnostics::instance().error("Failed to write debug live MMD camera frame");
+    } else {
+      Diagnostics::instance().warn("Failed to capture debug live MMD camera frame");
+    }
+  }
+  auto cams = camera_.buildFaceCameras(
+      s.vrMode, s.stereoMode, leftEye, s.ipdUnits, s.faceSize, 0.1f, 10000.f);
+
+  std::array<ImageBuffer, 6> faces{};
+  std::vector<CubeFace> order;
+  if (s.vrMode == VrMode::VR360) {
+    order = {CubeFace::PosX, CubeFace::NegX, CubeFace::PosY, CubeFace::NegY, CubeFace::PosZ, CubeFace::NegZ};
+  } else {
+    order = {CubeFace::PosZ, CubeFace::NegX, CubeFace::PosX, CubeFace::PosY, CubeFace::NegY};
+  }
+  for (size_t i = 0; i < cams.size() && i < order.size(); ++i) {
+    waitIfPaused();
+    if (cancel_.load()) return false;
+    ImageBuffer face;
+    if (!redraw_->renderView(cams[i], face)) {
+      Diagnostics::instance().error("renderView failed for face");
+      return false;
+    }
+    faces[(int)order[i]] = std::move(face);
+    if (dumpFaces) {
+      std::wstring suffix = leftEye ? L"_L_" : L"_R_";
+      suffix += cubeFaceName(order[i]);
+      if (!faceWriter.writeFrame(faces[(int)order[i]], debugFrame, suffix.c_str()))
+        Diagnostics::instance().error("Failed to write debug cubemap face");
+    }
+  }
+  if (dumpFirstLeftEye) {
+    firstFaceDebugDumped_ = true;
+    Diagnostics::instance().info("Saved first left-eye cubemap faces under debug_faces");
+  }
+
+  outEye = composeFromFaces(faces, nullptr, [&]{
+    RenderSettings mono = s; mono.stereoMode = StereoMode::Mono; return mono;
+  }());
+  return !outEye.empty();
+}
+
+bool RenderController::processAnimationFrame(int frameIndex) {
+  waitIfPaused();
+  if (cancel_.load()) return false;
+  auto s = settings();
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    progress_.currentFrame = frameIndex;
+    progress_.stage = L"rendering";
+    progress_.running = true;
+    progress_.paused = paused_.load();
+    updateTimingLocked(progress_.completedCount);
+  }
+  if (progressCb_) progressCb_(progress());
+
+  // Advance MMD's playhead before capture — otherwise every PNG is the same pose.
+  if (redraw_ && !redraw_->seekAnimationFrame(frameIndex)) {
+    Diagnostics::instance().error(
+        "seekAnimationFrame failed; MMD frame Edit not found or not updating");
+    return false;
+  }
+
+  CameraState saved = camera_.snapshot();
+  auto restoreSceneCamera = [&] {
+    if (redraw_) redraw_->restoreSceneCamera();
+  };
+
+  ImageBuffer left, right;
+  if (!renderEye(true, left)) {
+    restoreSceneCamera();
+    camera_.restore(saved);
+    camera_.endOverride();
+    return false;
+  }
+  ImageBuffer composed = left;
+  // Stereo eye offset needs cubemap/camera override; safe mode stays mono.
+  if (s.cubemapFaces && s.stereoMode == StereoMode::Stereo) {
+    if (!renderEye(false, right)) {
+      restoreSceneCamera();
+      camera_.restore(saved);
+      camera_.endOverride();
+      return false;
+    }
+    composed = StereoEngine::composeSideBySide(left, right);
+  }
+
+  restoreSceneCamera();
+  camera_.endOverride();
+  camera_.restore(saved);
+
+  if (!asyncWriter_) asyncWriter_ = std::make_unique<AsyncImageWriter>(s.outputDir);
+  asyncWriter_->enqueue(std::move(composed), frameIndex);
+
+  JobStateData js;
+  js.settings = s;
+  js.lastCompletedFrame = frameIndex;
+  js.totalFrames = progress_.totalFrames;
+  js.finished = false;
+  JobState::save(JobState::defaultPath(s.outputDir), js);
+
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    progress_.lastCompletedFrame = frameIndex;
+    progress_.stage = L"frame_done";
+    updateTimingLocked(progress_.completedCount + 1);
+  }
+  if (progressCb_) progressCb_(progress());
+  return true;
+}
+
+bool RenderController::start(ProgressCallback cb) {
+  if (running_.exchange(true)) return false;
+  cancel_.store(false);
+  paused_.store(false);
+  firstFaceDebugDumped_ = false;
+  progressCb_ = std::move(cb);
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (settings_.faceSize <= 0)
+      settings_.faceSize = suggestedFaceSize(settings_.resolution, settings_.quality);
+  }
+  auto s = settings();
+  Parallel::setThreadLimit(s.workerThreads);
+  Parallel::setCancelFlag(&cancel_);
+  asyncWriter_ = std::make_unique<AsyncImageWriter>(s.outputDir, s.writeThreads, s.writeQueueMax);
+  Diagnostics::instance().info(
+      std::string("mode=") + (s.cubemapFaces ? "cubemap(experimental)" : "live-camera(safe)") +
+      " CPU threads=" + std::to_string(Parallel::resolveWorkers()) +
+      " face=" + std::to_string(s.faceSize) +
+      " pngWriters=" + std::to_string(std::max(1, s.writeThreads)) +
+      " pngQueue=" + (s.writeQueueMax > 0 ? std::to_string(s.writeQueueMax) : std::string("unlimited")));
+
+  int start = s.frameStart;
+  int end = s.frameEnd;
+  JobStateData existing;
+  if (JobState::load(JobState::defaultPath(s.outputDir), existing) && !existing.finished) {
+    if (existing.lastCompletedFrame >= start)
+      start = existing.lastCompletedFrame + 1;
+    Diagnostics::instance().info("Resuming job from frame " + std::to_string(start));
+  }
+  if (end < start) end = start;
+
+  runStart_ = std::chrono::steady_clock::now();
+  pausedAccumSec_ = 0;
+  pauseClockRunning_ = false;
+
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    progress_ = {};
+    progress_.running = true;
+    progress_.totalFrames = end - s.frameStart + 1;
+    progress_.stage = L"starting";
+    progress_.etaSec = -1;
+  }
+  if (progressCb_) progressCb_(progress());
+
+  bool ok = true;
+  for (int f = start; f <= end; ++f) {
+    waitIfPaused();
+    if (cancel_.load()) {
+      ok = false;
+      break;
+    }
+    if (!processAnimationFrame(f)) {
+      ok = false;
+      std::lock_guard<std::mutex> lock(mu_);
+      progress_.lastError = L"frame failed";
+      break;
+    }
+  }
+
+  if (asyncWriter_) {
+    if (!asyncWriter_->flush()) {
+      ok = false;
+      Diagnostics::instance().error("Async PNG write failed");
+    }
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    lastOutputDir_ = s.outputDir;
+    lastOutputMp4_.clear();
+    lastEncodeOk_ = false;
+    lastEncodeError_.clear();
+  }
+
+  if (ok && !cancel_.load() && s.encodeVideo) {
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      progress_.stage = L"encoding";
+      updateTimingLocked(progress_.completedCount);
+    }
+    if (progressCb_) progressCb_(progress());
+
+    std::wstring err;
+    std::wstring mp4 = s.outputDir + L"\\" + s.jobName + L".mp4";
+    std::wstring tmp = s.outputDir + L"\\" + s.jobName + L"_raw.mp4";
+    const double audioStartSec =
+        (s.fps > 0.0 && s.frameStart > 0) ? (double)s.frameStart / s.fps : 0.0;
+    if (VideoEncoder::encodeSequence(s.outputDir, L"frame_%06d.png", tmp, s.fps, s.ffmpegPath,
+                                     s.encodeCodec, s.audioPath, audioStartSec, &err)) {
+      std::wstring finalOut = mp4;
+      // YouTube VR recognition: inject Spherical UUID when we produced equirect (cubemap)
+      // or the user left writeSphericalMeta on for a custom pipeline.
+      const bool wantMeta = s.writeSphericalMeta && s.cubemapFaces;
+      int metaW = s.outputWidth;
+      int metaH = s.outputHeight;
+      if (s.cubemapFaces && s.stereoMode == StereoMode::Stereo)
+        metaW = s.outputWidth * 2;
+      if (wantMeta) {
+        if (!VideoEncoder::injectVrMetadata(tmp, finalOut, s.vrMode, s.stereoMode, metaW, metaH,
+                                            s.ffmpegPath, &err)) {
+          Diagnostics::instance().warn("VR metadata inject failed; keeping raw mp4");
+          finalOut = tmp;
+        } else {
+          std::error_code ec;
+          std::filesystem::remove(tmp, ec);
+        }
+      } else {
+        std::error_code ec;
+        std::filesystem::remove(finalOut, ec);
+        std::filesystem::rename(tmp, finalOut, ec);
+        if (ec) finalOut = tmp;
+      }
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        lastOutputMp4_ = finalOut;
+        lastEncodeOk_ = true;
+        lastEncodeError_.clear();
+      }
+      Diagnostics::instance().infoW(L"MP4 written: " + finalOut);
+    } else {
+      Diagnostics::instance().warn("encode failed (see wide error in log)");
+      Diagnostics::instance().infoW(L"encode error: " + err);
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        lastOutputMp4_ = mp4;
+        lastEncodeOk_ = false;
+        lastEncodeError_ = err;
+      }
+    }
+  } else if (ok && !cancel_.load()) {
+    Diagnostics::instance().infoW(L"PNG sequence in: " + s.outputDir);
+  }
+
+  if (asyncWriter_) {
+    asyncWriter_->shutdown();
+    asyncWriter_.reset();
+  }
+  Parallel::setCancelFlag(nullptr);
+  if (abortHandler_) abortHandler_();
+
+  JobStateData js;
+  js.settings = s;
+  js.lastCompletedFrame = progress_.lastCompletedFrame;
+  js.totalFrames = progress_.totalFrames;
+  js.finished = ok && !cancel_.load();
+  JobState::save(JobState::defaultPath(s.outputDir), js);
+
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    progress_.running = false;
+    progress_.paused = false;
+    progress_.stage = ok ? L"done" : (cancel_.load() ? L"cancelled" : L"error");
+    updateTimingLocked(progress_.completedCount);
+  }
+  if (progressCb_) progressCb_(progress());
+  running_.store(false);
+  paused_.store(false);
+  return ok && !cancel_.load();
+}
+
+} // namespace mmdvr

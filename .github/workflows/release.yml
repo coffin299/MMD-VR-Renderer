@@ -1,0 +1,111 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fetch third-party deps
+        shell: pwsh
+        run: |
+          powershell -ExecutionPolicy Bypass -File .\tools\fetch_deps.ps1
+          # FFmpeg is optional for the plugin zip; keep release lean without ffmpeg.exe
+
+      - name: Configure & build
+        shell: pwsh
+        run: |
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+          cmake --build build --config Release --target d3d9 -- /m
+          cmake --build build --config Release --target mmdvr_tests -- /m
+          cmake --build build --config Release --target mmdvr_offline -- /m
+
+      - name: Run unit tests
+        shell: pwsh
+        run: .\build\Release\mmdvr_tests.exe
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $stage = "dist\MMD-VR-Renderer-$tag"
+          New-Item -ItemType Directory -Force -Path @(
+            "$stage\bin",
+            "$stage\tools",
+            "$stage\docs"
+          ) | Out-Null
+          Copy-Item .\build\Release\d3d9_mmdvr.dll "$stage\bin\"
+          Copy-Item .\build\Release\d3d9.dll "$stage\bin\" -ErrorAction SilentlyContinue
+          if (-not (Test-Path "$stage\bin\d3d9.dll")) {
+            Copy-Item .\build\Release\d3d9_mmdvr.dll "$stage\bin\d3d9.dll"
+          }
+          Copy-Item .\build\Release\mmdvr_offline.exe "$stage\bin\" -ErrorAction SilentlyContinue
+          @'
+          #Requires -Version 5.1
+          param(
+            [Parameter(Mandatory=$false)]
+            [string]$MmdDir = ""
+          )
+          $ErrorActionPreference = "Stop"
+          if (-not $MmdDir) {
+            $MmdDir = Read-Host "MMD folder path (directory containing MikuMikuDance.exe)"
+          }
+          $pkgRoot = Split-Path -Parent $PSScriptRoot
+          $bin = Join-Path $pkgRoot "bin"
+          & (Join-Path $PSScriptRoot "install_to_mmd_core.ps1") -MmdDir $MmdDir -BuildDir $bin
+          '@ | Set-Content "$stage\tools\install_to_mmd.ps1" -Encoding UTF8
+          Copy-Item .\tools\install_to_mmd.ps1 "$stage\tools\install_to_mmd_core.ps1"
+          Copy-Item .\tools\uninstall_from_mmd.ps1 "$stage\tools\"
+          Copy-Item .\docs\* "$stage\docs\"
+          Copy-Item .\README.md, .\LICENSE, .\NOTICE, .\CHANGELOG.txt "$stage\" -ErrorAction SilentlyContinue
+          $zip = "dist\MMD-VR-Renderer-$tag-win64.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Compress-Archive -Path $stage -DestinationPath $zip -Force
+          Get-Item $zip | Format-List FullName, Length
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build BOOTH installer
+        shell: pwsh
+        run: |
+          powershell -ExecutionPolicy Bypass -File .\tools\build_booth_installer.ps1
+          Copy-Item .\dist\booth\MMD-VR-Renderer-Installer.exe `
+            ".\dist\MMD-VR-Renderer-Installer-${{ github.ref_name }}.exe" -Force
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: MMD-VR-Renderer ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/MMD-VR-Renderer-${{ github.ref_name }}-win64.zip
+            dist/MMD-VR-Renderer-Installer-${{ github.ref_name }}.exe
+          body: |
+            ## 配布物 / Artifacts
+            - `MMD-VR-Renderer-${{ github.ref_name }}-win64.zip` — `d3d9.dll`（読込用）+ `d3d9_mmdvr.dll`（同内容・目印）、導入スクリプト、ドキュメント
+            - `MMD-VR-Renderer-Installer-${{ github.ref_name }}.exe` — BOOTH 向け（最新 Release を取得して MMD へ導入・更新）
+
+            ## 導入 / Install
+            1. zip を展開
+            2. `tools\install_to_mmd.ps1` を実行（MMD フォルダを指定）
+            3. `MikuMikuDance.exe` を起動 → メニュー **VRレンダラー (VR Renderer)**
+
+            または BOOTH インストーラー exe で MMD フォルダを指定 → **導入 / 更新**
+
+            ## 不具合報告 / Bug reports
+            https://github.com/coffin299/MMD-VR-Renderer/issues
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

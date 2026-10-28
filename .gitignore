@@ -1,0 +1,48 @@
+# Build
+build/
+out/
+.vs/
+x64/
+Win32/
+Debug/
+Release/
+cmake-build-*/
+*.user
+*.suo
+*.sdf
+*.opensdf
+*.VC.db
+*.VC.opendb
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+!third_party/**/*.lib
+
+# Local / generated packages (rebuild with tools + cmake)
+dist/
+tools/ffmpeg/
+tools/ffmpeg.zip
+third_party/ffmpeg/
+
+# BOOTH installer build (source kept; publish to dist/booth/)
+tools/booth_installer/bin/
+tools/booth_installer/obj/
+*.csproj.user
+
+# MinHook IDE sample projects (sources under src/ are kept)
+third_party/minhook/build/
+third_party/minhook/dll_resources/
+
+# Logs / runtime leftovers
+*.log
+job.json
+.mmdvr_backup/
+mmdvr_captures/
+mmdvr_output/
+**/frame_*.png
+
+# IDE
+.idea/
+*.code-workspace
