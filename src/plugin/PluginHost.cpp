@@ -523,10 +523,14 @@ void PluginHost::onBeforePresent(IDirect3DDevice9* device) {
   // contain black editor/UI space; cropping the whole backbuffer then making it
   // square turns that editor space into black cubemap faces and appears as a
   // ray-mmd panorama failure.
+  ImageBuffer img;
+  bool usedPreOverlay = capture_.hasStagedSurface();
+  // Window viewport crop belongs on the backbuffer fallback only. Applying it
+  // to a face-sized staged RT punches a tiny 772² hole out of a 4K–8K face.
   D3DVIEWPORT9 viewport{};
   const bool haveViewport = SUCCEEDED(device->GetViewport(&viewport)) &&
                             viewport.Width > 0 && viewport.Height > 0;
-  if (haveViewport) {
+  if (!usedPreOverlay && haveViewport) {
     capture_.setViewportCrop(
         static_cast<int>(viewport.X), static_cast<int>(viewport.Y),
         static_cast<int>(viewport.Width), static_cast<int>(viewport.Height));
@@ -549,8 +553,6 @@ void PluginHost::onBeforePresent(IDirect3DDevice9* device) {
   } else {
     capture_.clearCrop();
   }
-  ImageBuffer img;
-  bool usedPreOverlay = capture_.hasStagedSurface();
   bool ok = usedPreOverlay ? capture_.captureStaged(img) : capture_.captureViewport(img);
   if (!ok && usedPreOverlay) {
     // A driver may reject the staged copy's format. Preserve rendering rather
@@ -594,17 +596,14 @@ bool PluginHost::seekAnimationFrame(int frameIndex) {
   }
   const auto settings = controller_.settings();
   if (settings.cubemapFaces && !mmdOutputSizeConfigured_) {
-    // The final 8K output is equirectangular. Each source cubemap face needs
-    // its own true MMD render target, normally 3072×3072 at the 8K preset;
-    // upscaling an on-screen 1080p viewport only produces soft 8K PNGs.
-    const int faceSize = settings.resolvedFaceSize();
-    if (!timeline_.setOutputSize(faceSize, faceSize)) {
-      Diagnostics::instance().error(
-          "seekAnimationFrame: failed to set MMD output size for cubemap face capture");
-      return false;
-    }
+    // Skip MMD「出力サイズ」changes for now. Setting 4096/7680 left the window
+    // backbuffer at 1920×1080 (no Pre-overlay face RT ever staged) while
+    // thrashing MME/ray-mmd targets. Capture the live viewport until a real
+    // face-sized RT path works.
     mmdOutputSizeConfigured_ = true;
     refreshBackbufferSize();
+    Diagnostics::instance().info(
+        "seekAnimationFrame: keeping MMD output size; capturing window viewport");
   }
   if (!timeline_.frameEdit() || !IsWindow(timeline_.frameEdit())) {
     if (!timeline_.bind(mmdHwnd_)) return false;
@@ -787,7 +786,13 @@ bool PluginHost::renderView(const CameraState& cam, ImageBuffer& out) {
   }
   if (ok) {
     out = std::move(pendingCapture_);
-    Diagnostics::instance().info(out.empty() ? "renderView: empty capture" : "renderView: face ok");
+    if (out.empty()) {
+      Diagnostics::instance().info("renderView: empty capture");
+    } else {
+      char msg[96];
+      std::snprintf(msg, sizeof(msg), "renderView: face ok %dx%d", out.width, out.height);
+      Diagnostics::instance().info(msg);
+    }
     return !out.empty();
   }
 

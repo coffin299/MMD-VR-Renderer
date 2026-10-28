@@ -34,6 +34,9 @@ public:
 
   static void forRows(int rows, const std::function<void(int)>& fn) {
     if (rows <= 0) return;
+    // Pool job state is single-flight. Serialize so a stray overlap (or future
+    // caller) cannot clobber fn_/epoch_ and crash worker threads.
+    std::lock_guard<std::mutex> gate(runGate());
     const int workers = resolveWorkers();
     if (rows < 32 || workers <= 1) {
       for (int y = 0; y < rows; ++y) {
@@ -127,6 +130,11 @@ private:
   static Pool& pool() {
     static Pool p;
     return p;
+  }
+
+  static std::mutex& runGate() {
+    static std::mutex m;
+    return m;
   }
 
   static inline std::atomic<int> threadLimit_{0};

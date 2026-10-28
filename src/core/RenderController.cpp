@@ -299,11 +299,13 @@ bool RenderController::captureCubemapEye(bool leftEye, std::array<ImageBuffer, 6
   faces = {};
 
   const CameraState base = camera_.snapshot();
-  const bool dumpFirstLeftEye = leftEye && !firstFaceDebugDumped_;
-  const bool dumpFaces = dumpFacesEnabled() || dumpFirstLeftEye;
+  // Opt-in only (MMDVR_DUMP_FACES=1). Auto-dump used the non-const PNG writer
+  // which packRgbaToRgbInPlace()'d the live face buffers; the following
+  // equirect pass then read past the end → c0000005 inside our d3d9.dll.
+  const bool dumpFaces = dumpFacesEnabled();
   ImageSequenceWriter faceWriter(s.outputDir + L"\\debug_faces");
   const int debugFrame = progress().currentFrame;
-  if (dumpFirstLeftEye) {
+  if (dumpFaces && leftEye && !firstFaceDebugDumped_) {
     char msg[256];
     std::snprintf(
         msg, sizeof(msg),
@@ -315,7 +317,8 @@ bool RenderController::captureCubemapEye(bool leftEye, std::array<ImageBuffer, 6
 
     ImageBuffer live;
     if (redraw_->captureView(live)) {
-      if (!faceWriter.writeFrame(live, debugFrame, L"_L_live_mmd_camera"))
+      if (!faceWriter.writeFrame(static_cast<const ImageBuffer&>(live), debugFrame,
+                                 L"_L_live_mmd_camera"))
         Diagnostics::instance().error("Failed to write debug live MMD camera frame");
     } else {
       Diagnostics::instance().warn("Failed to capture debug live MMD camera frame");
@@ -342,11 +345,13 @@ bool RenderController::captureCubemapEye(bool leftEye, std::array<ImageBuffer, 6
     if (dumpFaces) {
       std::wstring suffix = leftEye ? L"_L_" : L"_R_";
       suffix += cubeFaceName(order[i]);
-      if (!faceWriter.writeFrame(faces[(int)order[i]], debugFrame, suffix.c_str()))
+      // const overload copies first — never destroy face RGBA used by compose.
+      if (!faceWriter.writeFrame(static_cast<const ImageBuffer&>(faces[(int)order[i]]),
+                                 debugFrame, suffix.c_str()))
         Diagnostics::instance().error("Failed to write debug cubemap face");
     }
   }
-  if (dumpFirstLeftEye) {
+  if (dumpFaces && leftEye && !firstFaceDebugDumped_) {
     firstFaceDebugDumped_ = true;
     Diagnostics::instance().info("Saved first left-eye cubemap faces under debug_faces");
   }
@@ -413,15 +418,11 @@ bool RenderController::processAnimationFrame(int frameIndex) {
   // Stereo High: project left equirect on a worker while capturing right-eye
   // faces — bilinear 8K compose often rivals several MMD presents.
   if (s.cubemapFaces && s.stereoMode == StereoMode::Stereo) {
-    const int facePx = s.resolvedFaceSize();
-    const unsigned long long faceSetMb =
-        (static_cast<unsigned long long>(facePx) * facePx * 4ull * 6ull) /
-        (1024ull * 1024ull);
-    const unsigned long long availMb = availablePhysMb();
-    // Overlap only when holding both face sets briefly still leaves headroom.
-    const bool overlapCompose =
-        availMb == 0 || availMb > faceSetMb * 2ull + 6144ull;
-
+    // Never project the left eye on a worker while the right eye still drives
+    // MMD Present. Overlap looked fine on free-RAM math, but WER shows
+    // c0000005 inside our d3d9.dll mid right-eye faces every time (e.g. face
+    // 7680 jobs dying after ~7 faces with no ERROR line). Parallel CPU
+    // equirect + live D3D9/MME is not safe on this stack.
     std::array<ImageBuffer, 6> facesL{};
     if (!captureCubemapEye(true, facesL)) {
       restoreSceneCamera();
@@ -433,20 +434,16 @@ bool RenderController::processAnimationFrame(int frameIndex) {
     ImageBuffer left, right;
     RenderSettings mono = s;
     mono.stereoMode = StereoMode::Mono;
-    std::thread projectLeft;
-    if (overlapCompose) {
-      projectLeft = std::thread([&] {
-        left = composeFromFaces(facesL, nullptr, mono);
-        facesL = {};
-      });
-    } else {
-      left = composeFromFaces(facesL, nullptr, mono);
-      facesL = {};
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      progress_.stage = L"projecting";
     }
+    if (progressCb_) progressCb_(progress());
+    left = composeFromFaces(facesL, nullptr, mono);
+    facesL = {};
 
     std::array<ImageBuffer, 6> facesR{};
     if (!captureCubemapEye(false, facesR)) {
-      if (projectLeft.joinable()) projectLeft.join();
       restoreSceneCamera();
       camera_.restore(saved);
       camera_.endOverride();
@@ -465,7 +462,6 @@ bool RenderController::processAnimationFrame(int frameIndex) {
 
     right = composeFromFaces(facesR, nullptr, mono);
     facesR = {};
-    if (projectLeft.joinable()) projectLeft.join();
 
     if (left.empty() || right.empty()) {
       Diagnostics::instance().error("stereo equirect compose failed");

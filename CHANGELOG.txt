@@ -10,6 +10,10 @@ GitHub Release Full Changelog → this file on the release tag.
 --------------------------------------------------------------------------------
 
 ### 修正 / Fixed
+- JA: **左目面の直後に必ず落ちる**: `debug_faces` 自動保存が面バッファを RGB に破壊変換 → 正距円筒投影がバッファ外読み。自動ダンプ停止＋const 書き込み、MMD出力サイズ変更も当面スキップ
+  EN: **Crash right after left-eye faces**: auto `debug_faces` dump packed face buffers to RGB in-place, then equirect read past the end. Disable auto-dump (const write only); skip MMD output-size changes for now
+- JA: **開始直後に MMD が落ちる（VRAM/RAM ほぼ未使用）**: ステレオで左目投影と右目キャプチャを同時実行していたのをやめ、MMD 出力サイズは当面 4096 にクランプ。ログは `mmd_vr_renderer.log`、WER は `d3d9.dll` の c0000005
+  EN: **MMD crashes right after start (little VRAM/RAM use)**: stop overlapping left-eye project with right-eye capture; clamp MMD output size to 4096 for now. Log: `mmd_vr_renderer.log`; WER: c0000005 in `d3d9.dll`
 - JA: **RAM/VRAM に余裕があっても長時間でクラッシュ**: 巨大キャプチャ RT の毎フェイス Create/Release と `EvictManagedResources` 連打をやめ、投影用ワーカーをスレッドプールで再利用。面サイズ固定ステージ、pool 解放を Present スレッドへ遅延、マーカー除去のフル画像コピー廃止
   EN: **Crashes after a while despite free RAM/VRAM**: stop per-face RT thrash and mid-job Evict; persistent projection pool; face-fixed staging; defer pool Release to Present thread; ROI-only marker repair (no full-frame copies)
 - JA: 設定ダイアログをコンパクト化（9pt フォント＋レイアウト詰め）。注記は2行のまま
@@ -18,8 +22,8 @@ GitHub Release Full Changelog → this file on the release tag.
   EN: Relaxed auto PNG queue (≈20% free RAM / up to 12; multi-frame OK on high-RAM 8K)
 
 ### 追加 / Added
-- JA: 「このPC向け最適値」が DXGI の空き／搭載 VRAM を見て提案。VRAM16GB級は面7680まで推奨
-  EN: “Optimal for this PC” uses DXGI free/total VRAM; 16GB-class GPUs get face 7680
+- JA: 「このPC向け最適値」が DXGI の空き／搭載 VRAM を見て提案（当面の面サイズ上限は 4096）
+  EN: “Optimal for this PC” uses DXGI free/total VRAM (face autofill capped at 4096 for now)
 - JA: JA/EN UI 切替（ダイアログ内の言語ボタン）
   EN: Japanese/English UI toggle (language buttons in the dialog)
 - JA: エンコーダ選択（既定 libx264 / 自動 / NVENC / QSV / AMF）。FFmpeg が公開する HW を検出

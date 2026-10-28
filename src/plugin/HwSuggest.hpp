@@ -86,8 +86,9 @@ inline void queryGpuMemory(unsigned long long& totalMb, unsigned long long& free
 
 inline void applyVramCap(HwSuggest& out) {
   // Prefer total VRAM for capability; only hard-clamp on critically low free.
-  // 16GB cards (≈15360–16384 MB) can run max face (7680) for 8K — MMD may
-  // already hold several GB, so free≪total must not alone kill the suggestion.
+  // Face 7680 is still offered in the UI but autofill stays ≤4096: larger MMD
+  // output sizes have been APPCRASH'ing in our Present path before a true
+  // face-sized RT is ever staged (WER c0000005 in d3d9.dll).
   const unsigned long long total = out.vramTotalMb;
   const unsigned long long freeMb = out.vramFreeMb;
   if (total == 0 && freeMb == 0) return;
@@ -98,15 +99,12 @@ inline void applyVramCap(HwSuggest& out) {
     out.quality = q;
   };
 
-  // High-end cards: keep / upgrade to max face when capacity allows.
+  // High-end cards: 8K / face 4096 is the stable autofill ceiling for now.
   if (total >= 15360) {
     if (out.resolution == ResolutionPreset::Res8K || out.faceSize >= 4096) {
-      if (out.faceSize < 7680) out.faceSize = 7680;
+      if (out.faceSize < 4096) out.faceSize = 4096;
+      if (out.faceSize > 4096) out.faceSize = 4096;
       out.quality = QualityPreset::High;
-    }
-    // Only bail if almost no headroom left while MMD is already loaded.
-    if (freeMb > 0 && freeMb < 3072) {
-      out.faceSize = (std::min)(out.faceSize, 4096);
     }
     if (freeMb > 0 && freeMb < 1536) {
       downgrade(ResolutionPreset::Res4K, 2048, QualityPreset::Balanced);
@@ -174,8 +172,7 @@ inline HwSuggest suggestFromThisPc() {
   if (out.ramMb >= 48 && out.logicalCores >= 12) {
     out.quality = QualityPreset::High;
     out.resolution = ResolutionPreset::Res8K;
-    // 16GB VRAM → face 7680; otherwise 4096 until applyVramCap upgrades.
-    out.faceSize = (out.vramTotalMb >= 15360) ? 7680 : 4096;
+    out.faceSize = 4096;
     out.writeThreads = (std::min)(6, (std::max)(2, out.logicalCores / 4));
     out.writeQueueMax = (out.ramMb >= 48) ? 6 : 4;
     tier = tr.hwSuggestHigh;
@@ -183,7 +180,7 @@ inline HwSuggest suggestFromThisPc() {
     // Strong GPU even if RAM tier is mid-high.
     out.quality = QualityPreset::High;
     out.resolution = ResolutionPreset::Res8K;
-    out.faceSize = 7680;
+    out.faceSize = 4096;
     out.writeThreads = (std::min)(6, (std::max)(2, out.logicalCores / 4));
     out.writeQueueMax = (out.ramMb >= 48) ? 6 : 4;
     tier = tr.hwSuggestHigh;

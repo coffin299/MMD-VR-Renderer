@@ -24,6 +24,12 @@ static void sampleBilinear(const ImageBuffer& img, float u, float v, uint8_t out
   if (img.empty()) { out[0]=out[1]=out[2]=0; out[3]=255; return; }
   const int w = img.width;
   const int h = img.height;
+  // Guard against destructive RGB-packed buffers (width/height still RGBA-shaped).
+  if (img.rgba.size() < static_cast<size_t>(w) * static_cast<size_t>(h) * 4u) {
+    out[0] = out[1] = out[2] = 0;
+    out[3] = 255;
+    return;
+  }
   float uf = u * (float)(w - 1);
   float vf = v * (float)(h - 1);
   int x0 = (int)uf;

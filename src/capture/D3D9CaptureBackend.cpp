@@ -365,6 +365,15 @@ bool D3D9CaptureBackend::captureViewport(ImageBuffer& out, int maxSide) {
     std::lock_guard<std::mutex> lock(mu_);
     gpu = poolGpu_;
     sys = poolSys_;
+    if (gpu) gpu->AddRef();
+    if (sys) sys->AddRef();
+  }
+  if (!gpu || !sys) {
+    if (gpu) gpu->Release();
+    if (sys) sys->Release();
+    back->Release();
+    restoreDeviceBindings();
+    return false;
   }
 
   RECT srcRect{copyX, copyY, copyX + copyW, copyY + copyH};
@@ -376,27 +385,34 @@ bool D3D9CaptureBackend::captureViewport(ImageBuffer& out, int maxSide) {
     char buf[128];
     std::snprintf(buf, sizeof(buf), "StretchRect scale failed hr=0x%08lX", (unsigned long)hrS);
     Diagnostics::instance().error(buf);
+    gpu->Release();
+    sys->Release();
     restoreDeviceBindings();
     return false;
   }
 
   if (iso == CaptureIsolate::StretchRectOnly) {
+    gpu->Release();
+    sys->Release();
     restoreDeviceBindings();
     out.resize(dstW, dstH);
     return true;
   }
 
   HRESULT hr = dev->GetRenderTargetData(gpu, sys);
+  gpu->Release();
   if (FAILED(hr)) {
     char buf[128];
     std::snprintf(buf, sizeof(buf), "GetRenderTargetData failed hr=0x%08lX", (unsigned long)hr);
     Diagnostics::instance().error(buf);
+    sys->Release();
     restoreDeviceBindings();
     return false;
   }
 
   D3DLOCKED_RECT lr{};
   if (FAILED(sys->LockRect(&lr, nullptr, D3DLOCK_READONLY))) {
+    sys->Release();
     restoreDeviceBindings();
     return false;
   }
@@ -422,6 +438,7 @@ bool D3D9CaptureBackend::captureViewport(ImageBuffer& out, int maxSide) {
   }
 
   sys->UnlockRect();
+  sys->Release();
   restoreDeviceBindings();
   return true;
 }
