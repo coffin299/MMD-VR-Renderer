@@ -101,6 +101,7 @@ const Bundle kJa{
   L"出力フォルダを開きますか？",
   L"日本語",
   L"English",
+  L"レンダリング実行前に必ずプロジェクトを保存してください",
 };
 
 const Bundle kEn{
@@ -191,6 +192,7 @@ const Bundle kEn{
   L"Open the output folder?",
   L"日本語",
   L"English",
+  L"Always save your project before rendering",
 };
 
 } // namespace

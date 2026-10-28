@@ -99,6 +99,7 @@ struct Bundle {
   const wchar_t* openOutputFolder;
   const wchar_t* btnLangJa;
   const wchar_t* btnLangEn;
+  const wchar_t* saveBeforeRenderWarn;
 };
 
 const Bundle& t();

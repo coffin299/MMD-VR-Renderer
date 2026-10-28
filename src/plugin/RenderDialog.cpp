@@ -68,7 +68,8 @@ enum {
   IDC_LBL_SPEC = 1119,
   IDC_LBL_PR = 1120,
   IDC_LBL_ENCODE_CODEC = 1121,
-  IDC_LBL_FACE_HINT = 1122
+  IDC_LBL_FACE_HINT = 1122,
+  IDC_LBL_SAVE_WARN = 1123
 };
 
 static RenderSettings* g_settings = nullptr;
@@ -186,6 +187,7 @@ static void applyLabels(HWND hDlg) {
   setText(hDlg, IDC_LBL_PR, s.prWelcome);
   setText(hDlg, IDC_LANG_JA, s.btnLangJa);
   setText(hDlg, IDC_LANG_EN, s.btnLangEn);
+  setText(hDlg, IDC_LBL_SAVE_WARN, s.saveBeforeRenderWarn);
 
   int stereoSel = (int)SendDlgItemMessageW(hDlg, IDC_STEREO, CB_GETCURSEL, 0, 0);
   int qualitySel = (int)SendDlgItemMessageW(hDlg, IDC_QUALITY, CB_GETCURSEL, 0, 0);
@@ -356,7 +358,7 @@ bool ShowRenderDialog(HWND owner, RenderSettings& settings) {
   InitCommonControlsEx(&icc);
 
   constexpr int kClientW = 660;
-  constexpr int kClientH = 750;
+  constexpr int kClientH = 772;
   const DWORD style = WS_CAPTION | WS_POPUP | WS_SYSMENU;
   const DWORD exStyle = WS_EX_DLGMODALFRAME;
 
@@ -369,6 +371,15 @@ bool ShowRenderDialog(HWND owner, RenderSettings& settings) {
         SetBkColor(hdc, RGB(255, 220, 60));
         SetTextColor(hdc, RGB(20, 20, 20));
         return (LRESULT)g_yellowBrush;
+      }
+    }
+    if (m == WM_CTLCOLORSTATIC) {
+      HWND ctl = (HWND)l;
+      if (ctl && GetDlgCtrlID(ctl) == IDC_LBL_SAVE_WARN) {
+        HDC hdc = (HDC)w;
+        SetTextColor(hdc, RGB(200, 0, 0));
+        SetBkMode(hdc, TRANSPARENT);
+        return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
       }
     }
     if (m == WM_CREATE) {
@@ -440,9 +451,10 @@ bool ShowRenderDialog(HWND owner, RenderSettings& settings) {
       CreateWindowW(WC_LINK, L"", st, 165, 654, 200, 18, hWnd, (HMENU)IDC_ISSUES_LINK, 0, 0);
       CreateWindowW(L"STATIC", L"", st, 20, 680, 620, 18, hWnd, (HMENU)IDC_LBL_SPEC, 0, 0);
       CreateWindowW(L"STATIC", L"", st, 20, 702, 620, 18, hWnd, (HMENU)IDC_LBL_PR, 0, 0);
+      CreateWindowW(L"STATIC", L"", st, 20, 728, 620, 22, hWnd, (HMENU)IDC_LBL_SAVE_WARN, 0, 0);
 
       DlgProc(hWnd, WM_INITDIALOG, 0, 0);
-      ui_layout::FitClientSize(hWnd, 660, 750);
+      ui_layout::FitClientSize(hWnd, 660, 772);
       return 0;
     }
     if (m == WM_NOTIFY) {
