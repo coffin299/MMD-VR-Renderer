@@ -48,21 +48,32 @@ unsigned long long availablePhysMb() {
 }
 
 // Cap PNG queue so pending RGBA frames stay within a fraction of free RAM.
-// 8K stereo SBS ≈ 900MB/frame — unlimited queues are a crash vector.
+// 8K stereo SBS ≈ 900MB/frame — unlimited queues are still risky, but high-RAM
+// PCs (48–64 GB) can keep several frames in flight.
 int resolvePngQueueMax(const RenderSettings& s) {
   const size_t frameBytes = estimateComposedRgbaBytes(s);
   const unsigned long long availMb = availablePhysMb();
   int byRam = 2;
   if (frameBytes > 0 && availMb > 0) {
-    // ~10% of currently free RAM for the wait queue (writers hold extra copies).
-    const size_t budget = static_cast<size_t>((availMb * 1024ull * 1024ull) / 10ull);
+    // ~20% of free RAM for the wait queue (writers still hold extra copies).
+    const size_t budget =
+        static_cast<size_t>((availMb * 1024ull * 1024ull) * 20ull / 100ull);
     byRam = static_cast<int>(budget / frameBytes);
   }
   if (byRam < 1) byRam = 1;
-  if (byRam > 4) byRam = 4;
-  // Very large frames: never queue more than 1 unfinished PNG.
-  if (frameBytes >= 400ull * 1024ull * 1024ull) byRam = 1;
-  else if (frameBytes >= 200ull * 1024ull * 1024ull) byRam = (std::min)(byRam, 2);
+  if (byRam > 12) byRam = 12;
+
+  // Soft caps for huge frames — scale with how much RAM is actually free.
+  if (frameBytes >= 400ull * 1024ull * 1024ull) {
+    if (availMb >= 49152) byRam = (std::min)(byRam, 4);
+    else if (availMb >= 32768) byRam = (std::min)(byRam, 3);
+    else if (availMb >= 20480) byRam = (std::min)(byRam, 2);
+    else byRam = 1;
+  } else if (frameBytes >= 200ull * 1024ull * 1024ull) {
+    if (availMb >= 32768) byRam = (std::min)(byRam, 6);
+    else if (availMb >= 16384) byRam = (std::min)(byRam, 4);
+    else byRam = (std::min)(byRam, 2);
+  }
 
   if (s.writeQueueMax > 0)
     return (std::min)(s.writeQueueMax, byRam);
@@ -489,10 +500,10 @@ bool RenderController::processAnimationFrame(int frameIndex) {
 
   // Under memory pressure, drain PNG writers before capturing the next frame.
   const unsigned long long availMb = availablePhysMb();
-  if (asyncWriter_ && availMb > 0 && availMb < 6144) {
-    const int keep = availMb < 3072 ? 0 : 1;
+  if (asyncWriter_ && availMb > 0 && availMb < 4096) {
+    const int keep = availMb < 2048 ? 0 : 1;
     asyncWriter_->waitUntilPendingAtMost(keep);
-    if (availMb < 2048) {
+    if (availMb < 1536) {
       Diagnostics::instance().warn(
           "Low free RAM (" + std::to_string((unsigned long long)availMb) +
           " MB); drained PNG queue before next frame");

@@ -177,7 +177,7 @@ inline HwSuggest suggestFromThisPc() {
     // 16GB VRAM → face 7680; otherwise 4096 until applyVramCap upgrades.
     out.faceSize = (out.vramTotalMb >= 15360) ? 7680 : 4096;
     out.writeThreads = (std::min)(6, (std::max)(2, out.logicalCores / 4));
-    out.writeQueueMax = 4;
+    out.writeQueueMax = (out.ramMb >= 48) ? 6 : 4;
     tier = tr.hwSuggestHigh;
   } else if (out.vramTotalMb >= 15360 && out.ramMb >= 32 && out.logicalCores >= 8) {
     // Strong GPU even if RAM tier is mid-high.
@@ -185,7 +185,7 @@ inline HwSuggest suggestFromThisPc() {
     out.resolution = ResolutionPreset::Res8K;
     out.faceSize = 7680;
     out.writeThreads = (std::min)(6, (std::max)(2, out.logicalCores / 4));
-    out.writeQueueMax = 4;
+    out.writeQueueMax = (out.ramMb >= 48) ? 6 : 4;
     tier = tr.hwSuggestHigh;
   } else if (out.ramMb >= 24 && out.logicalCores >= 8) {
     out.quality = QualityPreset::Balanced;
@@ -220,10 +220,12 @@ inline HwSuggest suggestFromThisPc() {
     else tier = tr.hwSuggestLight;
   }
 
-  // Low free system RAM → smaller PNG queue.
-  if (out.ramFreeMb > 0 && out.ramFreeMb < 8192)
+  // Low free system RAM → smaller PNG queue (only when actually tight).
+  if (out.ramFreeMb > 0 && out.ramFreeMb < 12288)
+    out.writeQueueMax = (std::min)(out.writeQueueMax, 4);
+  if (out.ramFreeMb > 0 && out.ramFreeMb < 6144)
     out.writeQueueMax = (std::min)(out.writeQueueMax, 2);
-  if (out.ramFreeMb > 0 && out.ramFreeMb < 4096)
+  if (out.ramFreeMb > 0 && out.ramFreeMb < 3072)
     out.writeQueueMax = 1;
 
   const unsigned ramGb = (unsigned)(out.ramMb / 1024ull);
