@@ -28,7 +28,9 @@ public:
   // Save an MMD screen-capture source before editor UI is drawn. The surface
   // is copied on the D3D thread and read back later at the normal Present
   // synchronization point.
-  bool stageSurface(IDirect3DSurface9* source);
+  // preferW/H>0: allocate staged at that size and StretchRect (avoids recreating
+  // the RT when MMD briefly stages a window-sized surface during cubemap jobs).
+  bool stageSurface(IDirect3DSurface9* source, int preferW = 0, int preferH = 0);
   bool captureStaged(ImageBuffer& out, int maxSide = 0);
   bool hasStagedSurface() const;
   // Returns staged copy dimensions when ready.

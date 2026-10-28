@@ -139,7 +139,7 @@ static D3DFORMAT pickReadableFormat(D3DFORMAT src) {
   }
 }
 
-bool D3D9CaptureBackend::stageSurface(IDirect3DSurface9* source) {
+bool D3D9CaptureBackend::stageSurface(IDirect3DSurface9* source, int preferW, int preferH) {
   if (!source) return false;
 
   IDirect3DDevice9* dev = nullptr;
@@ -154,11 +154,14 @@ bool D3D9CaptureBackend::stageSurface(IDirect3DSurface9* source) {
     return false;
 
   const D3DFORMAT fmt = pickReadableFormat(desc.Format);
+  const int srcW = static_cast<int>(desc.Width);
+  const int srcH = static_cast<int>(desc.Height);
+  const int dstW = preferW > 0 ? preferW : srcW;
+  const int dstH = preferH > 0 ? preferH : srcH;
   bool stageOk = false;
   {
     std::lock_guard<std::mutex> lock(mu_);
-    stageOk = ensureStaged(dev, static_cast<int>(desc.Width),
-                           static_cast<int>(desc.Height), fmt);
+    stageOk = ensureStaged(dev, dstW, dstH, fmt);
   }
   if (!stageOk) return false;
 
@@ -166,10 +169,14 @@ bool D3D9CaptureBackend::stageSurface(IDirect3DSurface9* source) {
   {
     std::lock_guard<std::mutex> lock(mu_);
     staged = stagedGpu_;
+    if (staged) staged->AddRef();
   }
   if (!staged) return false;
 
-  const HRESULT hr = dev->StretchRect(source, nullptr, staged, nullptr, D3DTEXF_NONE);
+  const D3DTEXTUREFILTERTYPE filter =
+      (dstW != srcW || dstH != srcH) ? D3DTEXF_LINEAR : D3DTEXF_NONE;
+  const HRESULT hr = dev->StretchRect(source, nullptr, staged, nullptr, filter);
+  staged->Release();
   if (FAILED(hr)) {
     char buf[128];
     std::snprintf(buf, sizeof(buf), "StretchRect pre-overlay stage failed hr=0x%08lX",
@@ -207,9 +214,10 @@ bool D3D9CaptureBackend::ownsSurface(IDirect3DSurface9* surface) const {
 
 void D3D9CaptureBackend::clearStagedSurface() {
   std::lock_guard<std::mutex> lock(mu_);
-  // Drop the GPU copy as soon as it is no longer needed — at 8K face size
-  // a single A8R8G8B8 RT is ~235 MB of VRAM.
-  releaseStagedUnlocked();
+  // Keep the staged RT allocated for the job. Create/Release of 4K–8K
+  // surfaces every cubemap face fragments the D3D9 driver and crashes MMD
+  // after a while even when Task Manager still shows free VRAM.
+  stagedReady_ = false;
 }
 
 bool D3D9CaptureBackend::captureViewport(ImageBuffer& out, int maxSide) {

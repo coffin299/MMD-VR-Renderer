@@ -73,7 +73,7 @@ if(TARGET minhook)
   target_compile_definitions(d3d9_mmdvr PRIVATE MMDVR_HAS_MINHOOK=1)
 endif()
 # Do not link system d3d9.lib (would conflict with our proxy DLL name). Use headers + runtime LoadLibrary.
-target_link_libraries(d3d9_mmdvr PRIVATE comdlg32.lib shell32.lib user32.lib gdi32.lib ole32.lib comctl32.lib)
+target_link_libraries(d3d9_mmdvr PRIVATE comdlg32.lib shell32.lib user32.lib gdi32.lib ole32.lib comctl32.lib dxgi.lib)
 target_compile_definitions(d3d9_mmdvr PRIVATE _CRT_SECURE_NO_WARNINGS UNICODE _UNICODE)
 if(MSVC)
   target_compile_options(d3d9_mmdvr PRIVATE /W4 /permissive- /utf-8)

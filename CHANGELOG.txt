@@ -9,7 +9,15 @@ GitHub Release Full Changelog → this file on the release tag.
 ## 2026-10-29
 --------------------------------------------------------------------------------
 
+### 修正 / Fixed
+- JA: **RAM/VRAM に余裕があっても長時間でクラッシュ**: 巨大キャプチャ RT の毎フェイス Create/Release と `EvictManagedResources` 連打をやめ、投影用ワーカーをスレッドプールで再利用。面サイズ固定ステージ、pool 解放を Present スレッドへ遅延、マーカー除去のフル画像コピー廃止
+  EN: **Crashes after a while despite free RAM/VRAM**: stop per-face RT thrash and mid-job Evict; persistent projection pool; face-fixed staging; defer pool Release to Present thread; ROI-only marker repair (no full-frame copies)
+- JA: 設定ダイアログで途切れていた注記・チェック・サイズ行を2行表示／幅広に調整
+  EN: Dialog labels/checkboxes/size line no longer clip — allow 2-line wrap and wider controls
+
 ### 追加 / Added
+- JA: 「このPC向け最適値」が DXGI の空き VRAM も見て解像度／面サイズを抑える
+  EN: “Optimal for this PC” also reads free VRAM via DXGI and caps resolution/face size
 - JA: JA/EN UI 切替（ダイアログ内の言語ボタン）
   EN: Japanese/English UI toggle (language buttons in the dialog)
 - JA: エンコーダ選択（既定 libx264 / 自動 / NVENC / QSV / AMF）。FFmpeg が公開する HW を検出

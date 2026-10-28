@@ -42,23 +42,29 @@ void removeMmdCameraTargetMarker(ImageBuffer& image) {
   const int top = (std::max)(0, cy - radius);
   const int right = (std::min)(image.width - 1, cx + radius);
   const int bottom = (std::min)(image.height - 1, cy + radius);
-  const size_t pixelCount = static_cast<size_t>(image.width) * static_cast<size_t>(image.height);
-  std::vector<uint8_t> mask(pixelCount, 0);
+  const int rw = right - left + 1;
+  const int rh = bottom - top + 1;
+  // ROI-only mask (~37²). Never allocate W×H temporaries on 8K Present path.
+  std::vector<uint8_t> mask(static_cast<size_t>(rw) * static_cast<size_t>(rh), 0);
   int marked = 0;
 
-  auto index = [&](int x, int y) {
-    return static_cast<size_t>(y) * static_cast<size_t>(image.width) + static_cast<size_t>(x);
+  auto roi = [&](int x, int y) {
+    return static_cast<size_t>(y - top) * static_cast<size_t>(rw) +
+           static_cast<size_t>(x - left);
   };
+  auto pix = [&](int x, int y) {
+    return (static_cast<size_t>(y) * static_cast<size_t>(image.width) +
+            static_cast<size_t>(x)) *
+           4u;
+  };
+
   for (int y = top; y <= bottom; ++y) {
     for (int x = left; x <= right; ++x) {
-      const size_t p = index(x, y);
-      const size_t i = p * 4;
+      const size_t i = pix(x, y);
       const int r = image.rgba[i + 0];
       const int g = image.rgba[i + 1];
       const int b = image.rgba[i + 2];
-      // Covers MMD 9.32's #ED145B marker plus its alpha-blended edge. The
-      // readback preserves the overlay's alpha, so a white background yields
-      // light pink values around (247, 170, 200), not just the solid color.
+      // Covers MMD 9.32's #ED145B marker plus its alpha-blended edge.
       const bool lightMarker =
           r >= 220 && g <= 190 && b >= 120 && b <= 225 &&
           r - g >= 45 && r - b >= 25;
@@ -66,41 +72,36 @@ void removeMmdCameraTargetMarker(ImageBuffer& image) {
           r >= 130 && r <= 240 && g <= 140 && b <= 180 &&
           r - g >= 55 && r - b >= 25;
       if (lightMarker || darkMarker) {
-        mask[p] = 1;
+        mask[roi(x, y)] = 1;
         ++marked;
       }
     }
   }
-  // A handful of pink scene pixels near the middle are not enough evidence.
   if (marked < 12) return;
 
-  // The marker has anti-aliased translucent pixels whose color is the
-  // underlying scene rather than magenta. Include its immediate boundary so
-  // a thin red ring cannot survive the color-only pass.
   const std::vector<uint8_t> detected = mask;
   for (int y = top; y <= bottom; ++y) {
     for (int x = left; x <= right; ++x) {
-      if (!detected[index(x, y)]) continue;
+      if (!detected[roi(x, y)]) continue;
       for (int dy = -1; dy <= 1; ++dy) {
         for (int dx = -1; dx <= 1; ++dx) {
           const int nx = x + dx;
           const int ny = y + dy;
           if (nx >= left && nx <= right && ny >= top && ny <= bottom)
-            mask[index(nx, ny)] = 1;
+            mask[roi(nx, ny)] = 1;
         }
       }
     }
   }
 
-  const std::vector<uint8_t> source = image.rgba;
+  // In-place fill: only write masked pixels, only sample unmasked → safe.
   constexpr int kDirs[][2] = {
       {-1, 0}, {1, 0}, {0, -1}, {0, 1},
       {-1, -1}, {1, -1}, {-1, 1}, {1, 1},
   };
   for (int y = top; y <= bottom; ++y) {
     for (int x = left; x <= right; ++x) {
-      const size_t p = index(x, y);
-      if (!mask[p]) continue;
+      if (!mask[roi(x, y)]) continue;
 
       int sum[4] = {0, 0, 0, 0};
       int samples = 0;
@@ -109,16 +110,16 @@ void removeMmdCameraTargetMarker(ImageBuffer& image) {
           const int sx = x + dir[0] * step;
           const int sy = y + dir[1] * step;
           if (sx < 0 || sx >= image.width || sy < 0 || sy >= image.height) break;
-          const size_t q = index(sx, sy);
-          if (mask[q]) continue;
-          const size_t qi = q * 4;
-          for (int c = 0; c < 4; ++c) sum[c] += source[qi + c];
+          const bool inRoi = sx >= left && sx <= right && sy >= top && sy <= bottom;
+          if (inRoi && mask[roi(sx, sy)]) continue;
+          const size_t qi = pix(sx, sy);
+          for (int c = 0; c < 4; ++c) sum[c] += image.rgba[qi + c];
           ++samples;
           break;
         }
       }
       if (samples <= 0) continue;
-      const size_t i = p * 4;
+      const size_t i = pix(x, y);
       for (int c = 0; c < 4; ++c)
         image.rgba[i + c] = static_cast<uint8_t>(sum[c] / samples);
     }
@@ -230,6 +231,9 @@ void PluginHost::stagePreOverlaySource(
 
   const int score = scoreCandidate(static_cast<int>(desc.Width), static_cast<int>(desc.Height));
   if (score < 0) return;
+  // Once cubemap output size is live, ignore window-sized candidates so we
+  // never thrash a face-sized staged RT down to 1920 and back.
+  if (faceTarget > 0 && score < 100000) return;
 
   if (capture_.hasStagedSurface()) {
     int sw = 0, sh = 0;
@@ -237,16 +241,19 @@ void PluginHost::stagePreOverlaySource(
       return; // keep equal-or-better staged copy
   }
 
-  if (!capture_.stageSurface(source)) return;
+  const bool okStage = (faceTarget > 0)
+                           ? capture_.stageSurface(source, faceTarget, faceTarget)
+                           : capture_.stageSurface(source);
+  if (!okStage) return;
 
+  // Log once per job (or first face-sized upgrade). Per-face logging opens the
+  // log file thousands of times and hides real errors on long 8K runs.
   bool logCandidate = false;
   {
     std::lock_guard<std::mutex> lock(redrawMu_);
     if (!preOverlayCandidateLogged_) {
       preOverlayCandidateLogged_ = true;
       logCandidate = true;
-    } else if (score >= 100000) {
-      logCandidate = true; // log upgrade to true face-sized RT
     }
   }
   if (logCandidate) {
@@ -312,7 +319,18 @@ void PluginHost::releaseRenderSession(const char* reason) {
   restoreSceneCamera();
   if (hadTransformOverride)
     restoreObservedTransforms(device_);
-  capture_.releasePool();
+  // D3D9 COM Release must run on the device thread. Reset hook is already
+  // there; job-worker cleanup only arms a flag for the next Present.
+  if (isDeviceReset) {
+    capture_.releasePool();
+    wantReleasePool_.store(false);
+  } else {
+    wantReleasePool_.store(true);
+    if (mmdHwnd_ && IsWindow(mmdHwnd_)) {
+      InvalidateRect(mmdHwnd_, nullptr, FALSE);
+      PostMessageW(mmdHwnd_, WM_PAINT, 0, 0);
+    }
+  }
   capture_.setSquareCrop(true);
   mainPassDrawn_ = false;
   didReplaceThisFrame_ = false;
@@ -454,6 +472,9 @@ void PluginHost::onBeforePresent(IDirect3DDevice9* device) {
   if (device) device_ = device;
   onMainRt_ = true;
 
+  if (wantReleasePool_.exchange(false))
+    capture_.releasePool();
+
   bool doCapture = false;
   {
     std::unique_lock<std::mutex> lock(redrawMu_);
@@ -471,8 +492,8 @@ void PluginHost::onBeforePresent(IDirect3DDevice9* device) {
   }
 
   if (!doCapture) {
-    if (wantEvict_.exchange(false) && device)
-      device->EvictManagedResources();
+    // Drop stale evict requests; never call EvictManagedResources mid-job.
+    wantEvict_.store(false);
     if (controller_.camera().overrideActive() || IsTransformOverrideEnabled()) {
       controller_.camera().endOverride();
       SetTransformOverrideEnabled(false);
@@ -539,12 +560,11 @@ void PluginHost::onBeforePresent(IDirect3DDevice9* device) {
     ok = capture_.captureViewport(img);
   }
   capture_.clearCrop();
-  // Free the full-size staged RT (often 100s of MB). Keep the readback pool
-  // so the next face does not re-CreateRenderTarget every Present — that
-  // thrash dominated High-quality face time at 4K/8K.
+  // Mark staged unread only — do not Release the RT here (driver thrash).
+  // Do not EvictManagedResources during a long job; MME/ray-mmd often crash
+  // after repeated evicts even with free VRAM.
   capture_.clearStagedSurface();
-  if (wantEvict_.exchange(false) && device)
-    device->EvictManagedResources();
+  wantEvict_.store(false);
   // The fallback contains MMD's editor overlay. The native pre-overlay path
   // intentionally leaves scene pixels completely untouched.
   if (ok && !usedPreOverlay) removeMmdCameraTargetMarker(img);
@@ -624,10 +644,11 @@ void PluginHost::restoreSceneCamera() {
 }
 
 void PluginHost::trimCaptureResources() {
-  // Drop pool between animation frames (not every cubemap face) so High/8K
-  // reuses the same readback RTs within a frame, then returns VRAM to MME.
-  capture_.releasePool();
-  wantEvict_.store(true);
+  // Intentionally a no-op during the job. Releasing + recreating large RTs
+  // every animation frame (and EvictManagedResources) was a top suspect for
+  // "plenty of RAM/VRAM but crashes after a while" on D3D9 + MME.
+  // releaseRenderSession() still drops the pool when the job ends / cancels.
+  wantEvict_.store(false);
 }
 
 bool PluginHost::captureView(ImageBuffer& out) {

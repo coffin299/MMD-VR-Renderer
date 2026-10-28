@@ -74,6 +74,8 @@ private:
   bool wantCapture_ = false;
   bool captureReady_ = false;
   std::atomic<bool> wantEvict_{false};
+  // Armed by job worker; executed on Present (D3D thread) only.
+  std::atomic<bool> wantReleasePool_{false};
   bool preOverlayCandidateLogged_ = false;
   ImageBuffer pendingCapture_;
   CameraState pendingCam_{};

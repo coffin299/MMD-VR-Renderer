@@ -3,17 +3,23 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <Windows.h>
+#include <dxgi1_4.h>
 #include "mmdvr/Types.hpp"
 #include "UiStrings.hpp"
 #include <algorithm>
 #include <cstdio>
 #include <string>
 
+#pragma comment(lib, "dxgi.lib")
+
 namespace mmdvr {
 
 struct HwSuggest {
   int logicalCores = 4;
   unsigned long long ramMb = 8192;
+  unsigned long long ramFreeMb = 4096;
+  unsigned long long vramTotalMb = 0;
+  unsigned long long vramFreeMb = 0;
   QualityPreset quality = QualityPreset::Balanced;
   ResolutionPreset resolution = ResolutionPreset::Res4K;
   int workerThreads = 0;
@@ -23,6 +29,101 @@ struct HwSuggest {
   double fps = 60.0;
   std::wstring summary;
 };
+
+namespace {
+
+inline void queryGpuMemory(unsigned long long& totalMb, unsigned long long& freeMb) {
+  totalMb = 0;
+  freeMb = 0;
+  IDXGIFactory1* factory = nullptr;
+  if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory))) ||
+      !factory)
+    return;
+
+  unsigned long long bestTotal = 0;
+  unsigned long long bestFree = 0;
+  for (UINT i = 0;; ++i) {
+    IDXGIAdapter1* adapter = nullptr;
+    if (factory->EnumAdapters1(i, &adapter) == DXGI_ERROR_NOT_FOUND)
+      break;
+    if (!adapter) continue;
+
+    DXGI_ADAPTER_DESC1 desc{};
+    if (FAILED(adapter->GetDesc1(&desc)) || (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) {
+      adapter->Release();
+      continue;
+    }
+
+    const unsigned long long dedicated =
+        static_cast<unsigned long long>(desc.DedicatedVideoMemory) / (1024ull * 1024ull);
+    unsigned long long freeLocal = 0;
+
+    IDXGIAdapter3* adapter3 = nullptr;
+    if (SUCCEEDED(adapter->QueryInterface(__uuidof(IDXGIAdapter3),
+                                          reinterpret_cast<void**>(&adapter3))) &&
+        adapter3) {
+      DXGI_QUERY_VIDEO_MEMORY_INFO info{};
+      if (SUCCEEDED(adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info))) {
+        if (info.Budget >= info.CurrentUsage)
+          freeLocal = (info.Budget - info.CurrentUsage) / (1024ull * 1024ull);
+      }
+      adapter3->Release();
+    }
+    // Fallback when QueryVideoMemoryInfo is unavailable: treat ~55% of dedicated as free.
+    if (freeLocal == 0 && dedicated > 0)
+      freeLocal = (dedicated * 55ull) / 100ull;
+
+    if (dedicated > bestTotal || (dedicated == bestTotal && freeLocal > bestFree)) {
+      bestTotal = dedicated;
+      bestFree = freeLocal;
+    }
+    adapter->Release();
+  }
+  factory->Release();
+  totalMb = bestTotal;
+  freeMb = bestFree;
+}
+
+inline void applyVramCap(HwSuggest& out) {
+  // Cubemap faces + ray-mmd G-buffers dwarf the equirect itself.
+  // Thresholds are free VRAM (MB), not card size.
+  const unsigned long long v = out.vramFreeMb;
+  if (v == 0) return; // unknown — keep RAM-based pick
+
+  auto downgrade = [&](ResolutionPreset res, int face, QualityPreset q) {
+    out.resolution = res;
+    out.faceSize = face;
+    out.quality = q;
+  };
+
+  if (out.resolution == ResolutionPreset::Res8K && v < 10240) {
+    // Need ~10 GB free for comfortable 8K / face 4096 with MME.
+    if (v >= 6144)
+      downgrade(ResolutionPreset::Res4K, 2048, QualityPreset::Balanced);
+    else if (v >= 3072)
+      downgrade(ResolutionPreset::Res3K, 1536, QualityPreset::Balanced);
+    else
+      downgrade(ResolutionPreset::Res2K, 1024, QualityPreset::Fast);
+  } else if (out.resolution == ResolutionPreset::Res4K && v < 5120) {
+    if (v >= 3072)
+      downgrade(ResolutionPreset::Res3K, 1536, QualityPreset::Balanced);
+    else
+      downgrade(ResolutionPreset::Res2K, 1024, QualityPreset::Fast);
+  } else if (out.resolution == ResolutionPreset::Res3K && v < 2560) {
+    downgrade(ResolutionPreset::Res2K, 1024, QualityPreset::Fast);
+  }
+
+  // Even on high RAM PCs, tiny free VRAM must force light settings.
+  if (v > 0 && v < 2048) {
+    out.resolution = ResolutionPreset::Res2K;
+    out.faceSize = 1024;
+    out.quality = QualityPreset::Fast;
+    out.writeThreads = 1;
+    out.writeQueueMax = 1;
+  }
+}
+
+} // namespace
 
 inline HwSuggest suggestFromThisPc() {
   SYSTEM_INFO si{};
@@ -35,12 +136,14 @@ inline HwSuggest suggestFromThisPc() {
   out.logicalCores = (int)si.dwNumberOfProcessors;
   if (out.logicalCores < 1) out.logicalCores = 4;
   out.ramMb = ms.ullTotalPhys / (1024ull * 1024ull);
+  out.ramFreeMb = ms.ullAvailPhys / (1024ull * 1024ull);
   out.workerThreads = out.logicalCores;
   out.fps = 60.0;
+  queryGpuMemory(out.vramTotalMb, out.vramFreeMb);
 
   const auto& tr = ui::t();
-  // Rough tiers from RAM (+cores). GPU VRAM is hard without DXGI; RAM is a good proxy for 8K frames.
   const wchar_t* tier = tr.hwSuggestMid;
+  // Primary tier from installed RAM + cores, then clamp by free VRAM.
   if (out.ramMb >= 48 && out.logicalCores >= 12) {
     out.quality = QualityPreset::High;
     out.resolution = ResolutionPreset::Res8K;
@@ -71,10 +174,26 @@ inline HwSuggest suggestFromThisPc() {
     tier = tr.hwSuggestLight;
   }
 
-  // Use %u (not %llu) so MSVC swprintf matches the same way in EN/JA builds.
+  const ResolutionPreset beforeVram = out.resolution;
+  applyVramCap(out);
+  if (out.resolution != beforeVram) {
+    // Retarget tier label after VRAM clamp.
+    if (out.resolution == ResolutionPreset::Res8K) tier = tr.hwSuggestHigh;
+    else if (out.resolution == ResolutionPreset::Res4K) tier = tr.hwSuggestMidHigh;
+    else if (out.resolution == ResolutionPreset::Res3K) tier = tr.hwSuggestMid;
+    else tier = tr.hwSuggestLight;
+  }
+
+  // Low free system RAM → smaller PNG queue.
+  if (out.ramFreeMb > 0 && out.ramFreeMb < 8192)
+    out.writeQueueMax = (std::min)(out.writeQueueMax, 2);
+  if (out.ramFreeMb > 0 && out.ramFreeMb < 4096)
+    out.writeQueueMax = 1;
+
   const unsigned ramGb = (unsigned)(out.ramMb / 1024ull);
-  wchar_t detail[256];
-  std::swprintf(detail, 256, tr.hwSuggestDetailFmt, out.logicalCores, ramGb, tier);
+  const unsigned vramFreeGb = (unsigned)((out.vramFreeMb + 512ull) / 1024ull); // round
+  wchar_t detail[320];
+  std::swprintf(detail, 320, tr.hwSuggestDetailFmt, out.logicalCores, ramGb, vramFreeGb, tier);
   out.summary = detail;
   return out;
 }

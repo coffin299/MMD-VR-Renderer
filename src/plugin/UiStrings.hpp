@@ -72,7 +72,7 @@ struct Bundle {
   const wchar_t* recommendedSpec;
   const wchar_t* prWelcome;
   const wchar_t* btnAutoFill;
-  // Autofill status: cores, ramGb, tierSummary
+  // Autofill status: cores, ramGb, vramFreeGb, tierSummary
   const wchar_t* hwSuggestDetailFmt;
   const wchar_t* hwSuggestHigh;
   const wchar_t* hwSuggestMidHigh;

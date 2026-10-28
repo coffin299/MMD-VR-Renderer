@@ -684,6 +684,7 @@ bool RenderController::start(ProgressCallback cb) {
     asyncWriter_.reset();
   }
   Parallel::setCancelFlag(nullptr);
+  Parallel::shutdown();
   notifyStage(L"cleanup");
   // Full teardown on the job worker only — never from the progress-dialog UI thread.
   if (cleanupHandler_) cleanupHandler_();
