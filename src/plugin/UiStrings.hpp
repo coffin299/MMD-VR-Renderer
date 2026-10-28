@@ -127,6 +127,17 @@ struct Bundle {
   const wchar_t* encodeFallbackFmt;
   // Resume prompt: nextFrame, lastDone, total, projectFolder
   const wchar_t* resumeJobPromptFmt;
+  const wchar_t* tabRender;
+  const wchar_t* tabReencode;
+  const wchar_t* reencodeHint;
+  const wchar_t* labelReencodeProject;
+  const wchar_t* browseProjectTitle;
+  const wchar_t* btnReencode;
+  const wchar_t* chkReencodeSpherical;
+  const wchar_t* reencodeNoFrames;
+  const wchar_t* reencodeRunning;
+  const wchar_t* reencodeOkFmt;   // %s = mp4 path
+  const wchar_t* reencodeFailFmt; // %s = error
 };
 
 const Bundle& t();

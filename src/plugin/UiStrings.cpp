@@ -42,7 +42,7 @@ const Bundle kJa{
   L"IPD単位",
   L"CPUスレッド",
   L"面解像度",
-  L"※ キューブ1面の辺(px)。大きいほど綺麗で重い。最終2K〜8Kとは別",
+  L"※ キューブ1面の辺(px)。主にVRAM（面RT）＋キャプチャ時はRAMも消費。最終2K〜8Kとは別",
   L"PNG書込",
   L"キュー(RAM)",
   L"開始フレーム",
@@ -74,8 +74,8 @@ const Bundle kJa{
   L"プルリクエスト歓迎します",
   L"★ このPC向けの最適値を入れる",
   L"検出: CPU %d / RAM %uGB / VRAM空き約%uGB · %s",
-  L"高スペック寄り → 8K / 高画質 / 面4096（安定寄り）",
-  L"中〜高 → 4K / 標準 / 面2048",
+  L"高スペック寄り → 8K / 高画質 / 面7680（VRAM16GB級）",
+  L"中〜高 → 8K / 高画質 / 面4096（VRAM8GB級）",
   L"中スペック → 3K / 標準 / 面1536",
   L"軽め → 2K / 高速 / 面1024",
   L"0=全コア",
@@ -122,13 +122,25 @@ const Bundle kJa{
   L"日本語",
   L"English",
   L"レンダリング実行前に必ずプロジェクトを保存してください",
-  L"エンコーダ切替: %s\n（解像度制限またはHWエンコード失敗のため）",
+  L"エンコーダ: %s\n（HW不可／巨大解像度はHEVC Level7.2内へ縮小）",
   L"未完了のジョブがあります。\n\n"
   L"次フレーム: %d（完了済 %d / 予定 %d）\n"
   L"フォルダ:\n%s\n\n"
   L"はい = 途中から再開\n"
   L"いいえ = 最初からやり直し\n"
   L"キャンセル = 中止",
+  L"レンダー",
+  L"MP4再エンコード",
+  L"PNG連番が残っているプロジェクトから MP4 だけ作り直します。\n"
+  L"出力ルート\\プロジェクト名 または …\\frames を指定してください。",
+  L"プロジェクト / frames",
+  L"プロジェクトフォルダを選ぶ",
+  L"再エンコード開始",
+  L"YouTube VR用 Spherical メタデータを埋め込む",
+  L"frame_*.png が見つかりません。",
+  L"エンコード中…（完了までこのダイアログを閉じないでください）",
+  L"MP4を書き出しました:\n%s",
+  L"再エンコードに失敗しました。\n%s",
 };
 
 const Bundle kEn{
@@ -160,7 +172,7 @@ const Bundle kEn{
   L"IPD",
   L"CPU threads",
   L"Face res",
-  L"Note: cubemap face edge (px). Higher = sharper & heavier. Not the final 2K–8K",
+  L"Note: cubemap face edge (px). Uses VRAM (face RTs) + RAM on capture. Not the final 2K–8K",
   L"PNG writers",
   L"Queue (RAM)",
   L"Start frame",
@@ -192,8 +204,8 @@ const Bundle kEn{
   L"Pull requests welcome",
   L"★ Fill optimal values for this PC",
   L"Detected: %d CPU / %uGB RAM / ~%uGB free VRAM · %s",
-  L"High-end → 8K / High / face 4096 (stability-first)",
-  L"Mid-high → 4K / Balanced / face 2048",
+  L"High-end → 8K / High / face 7680 (16GB-class VRAM)",
+  L"Mid-high → 8K / High / face 4096 (8GB-class VRAM)",
   L"Mid → 3K / Balanced / face 1536",
   L"Light → 2K / Fast / face 1024",
   L"0=all cores",
@@ -240,13 +252,25 @@ const Bundle kEn{
   L"日本語",
   L"English",
   L"Always save your project before rendering",
-  L"Encoder fallback: %s\n(resolution limit or HW encode failure)",
+  L"Encoder: %s\n(HW unavailable / oversized frames scaled to HEVC Level 7.2)",
   L"An unfinished job was found.\n\n"
   L"Next frame: %d (done %d / planned %d)\n"
   L"Folder:\n%s\n\n"
   L"Yes = resume from there\n"
   L"No = restart from the beginning\n"
   L"Cancel = abort",
+  L"Render",
+  L"Re-encode MP4",
+  L"Rebuild MP4 from an existing PNG sequence.\n"
+  L"Pick the job folder (output\\project) or its frames\\ subfolder.",
+  L"Project / frames",
+  L"Choose project folder",
+  L"Start re-encode",
+  L"Embed Spherical metadata for YouTube VR",
+  L"No frame_*.png found.",
+  L"Encoding… (do not close this dialog until it finishes)",
+  L"MP4 written:\n%s",
+  L"Re-encode failed.\n%s",
 };
 
 } // namespace

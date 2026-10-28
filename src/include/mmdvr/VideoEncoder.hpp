@@ -59,7 +59,10 @@ public:
       double audioStartSec = 0.0,
       std::wstring* errorOut = nullptr,
       // Set when encoder was skipped or retried, e.g. L"HEVC NVENC → libx265".
-      std::wstring* fallbackOut = nullptr);
+      std::wstring* fallbackOut = nullptr,
+      // Actual encoded frame size (may be scaled down for HEVC Level 7.2).
+      int* encodedW = nullptr,
+      int* encodedH = nullptr);
 
   // Inject YouTube-recognizable Spherical Video metadata (Google UUID atom).
   // frameW/H = final encoded frame (stereo SBS width is already doubled).

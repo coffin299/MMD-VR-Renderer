@@ -85,10 +85,8 @@ inline void queryGpuMemory(unsigned long long& totalMb, unsigned long long& free
 }
 
 inline void applyVramCap(HwSuggest& out) {
-  // Prefer total VRAM for capability; only hard-clamp on critically low free.
-  // Face 7680 is still offered in the UI but autofill stays ≤4096: larger MMD
-  // output sizes have been APPCRASH'ing in our Present path before a true
-  // face-sized RT is ever staged (WER c0000005 in d3d9.dll).
+  // Face autofill by installed VRAM (observed ~6–7GB use even at face 7680):
+  //   ≥16GB → 7680,  ~8–15GB → 4096,  smaller → tighter caps.
   const unsigned long long total = out.vramTotalMb;
   const unsigned long long freeMb = out.vramFreeMb;
   if (total == 0 && freeMb == 0) return;
@@ -99,21 +97,22 @@ inline void applyVramCap(HwSuggest& out) {
     out.quality = q;
   };
 
-  // High-end cards: 8K / face 4096 is the stable autofill ceiling for now.
+  // 16GB-class: allow max face for 8K.
   if (total >= 15360) {
     if (out.resolution == ResolutionPreset::Res8K || out.faceSize >= 4096) {
-      if (out.faceSize < 4096) out.faceSize = 4096;
-      if (out.faceSize > 4096) out.faceSize = 4096;
+      if (out.faceSize < 7680) out.faceSize = 7680;
       out.quality = QualityPreset::High;
     }
-    if (freeMb > 0 && freeMb < 1536) {
+    if (freeMb > 0 && freeMb < 2048)
+      out.faceSize = (std::min)(out.faceSize, 4096);
+    if (freeMb > 0 && freeMb < 1536)
       downgrade(ResolutionPreset::Res4K, 2048, QualityPreset::Balanced);
-    }
     return;
   }
 
-  // 10–15 GB class: 8K / face 4096 OK; don't require 10 GB free.
-  if (total >= 10240) {
+  // 8–15GB class: face 4096 is the sweet spot (not 7680).
+  if (total >= 7168) {
+    if (out.faceSize > 4096) out.faceSize = 4096;
     if (out.resolution == ResolutionPreset::Res8K && out.faceSize < 4096)
       out.faceSize = 4096;
     if (freeMb > 0 && freeMb < 2048)
@@ -123,6 +122,7 @@ inline void applyVramCap(HwSuggest& out) {
 
   // Smaller GPUs: free VRAM still matters.
   const unsigned long long v = freeMb > 0 ? freeMb : total;
+  if (out.faceSize > 2048) out.faceSize = 2048;
   if (out.resolution == ResolutionPreset::Res8K && v < 6144) {
     if (v >= 4096)
       downgrade(ResolutionPreset::Res4K, 2048, QualityPreset::Balanced);
@@ -172,7 +172,8 @@ inline HwSuggest suggestFromThisPc() {
   if (out.ramMb >= 48 && out.logicalCores >= 12) {
     out.quality = QualityPreset::High;
     out.resolution = ResolutionPreset::Res8K;
-    out.faceSize = 4096;
+    // Face from VRAM: 16GB→7680, 8GB-class→4096 (applyVramCap refines).
+    out.faceSize = (out.vramTotalMb >= 15360) ? 7680 : 4096;
     out.writeThreads = (std::min)(6, (std::max)(2, out.logicalCores / 4));
     out.writeQueueMax = (out.ramMb >= 48) ? 6 : 4;
     tier = tr.hwSuggestHigh;
@@ -180,10 +181,17 @@ inline HwSuggest suggestFromThisPc() {
     // Strong GPU even if RAM tier is mid-high.
     out.quality = QualityPreset::High;
     out.resolution = ResolutionPreset::Res8K;
-    out.faceSize = 4096;
+    out.faceSize = 7680;
     out.writeThreads = (std::min)(6, (std::max)(2, out.logicalCores / 4));
     out.writeQueueMax = (out.ramMb >= 48) ? 6 : 4;
     tier = tr.hwSuggestHigh;
+  } else if (out.vramTotalMb >= 7168 && out.ramMb >= 24 && out.logicalCores >= 8) {
+    out.quality = QualityPreset::High;
+    out.resolution = ResolutionPreset::Res8K;
+    out.faceSize = 4096;
+    out.writeThreads = (std::min)(4, (std::max)(2, out.logicalCores / 4));
+    out.writeQueueMax = 4;
+    tier = tr.hwSuggestMidHigh;
   } else if (out.ramMb >= 24 && out.logicalCores >= 8) {
     out.quality = QualityPreset::Balanced;
     out.resolution = ResolutionPreset::Res4K;

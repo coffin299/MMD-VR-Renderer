@@ -637,15 +637,17 @@ bool RenderController::start(ProgressCallback cb) {
     notifyStage(L"encoding", tmp);
     const double audioStartSec =
         (s.fps > 0.0 && s.frameStart > 0) ? (double)s.frameStart / s.fps : 0.0;
+    int encW = 0, encH = 0;
     if (VideoEncoder::encodeSequence(s.pngSequenceDir(), L"frame_%06d.png", tmp, s.fps, s.ffmpegPath,
-                                     s.encodeCodec, s.audioPath, audioStartSec, &err, &fallback)) {
+                                     s.encodeCodec, s.audioPath, audioStartSec, &err, &fallback,
+                                     &encW, &encH)) {
       std::wstring finalOut = mp4;
       // YouTube VR recognition: inject Spherical UUID when we produced equirect (cubemap)
       // or the user left writeSphericalMeta on for a custom pipeline.
       const bool wantMeta = s.writeSphericalMeta && s.cubemapFaces;
-      int metaW = s.outputWidth;
-      int metaH = s.outputHeight;
-      if (s.cubemapFaces && s.stereoMode == StereoMode::Stereo)
+      int metaW = encW > 0 ? encW : s.outputWidth;
+      int metaH = encH > 0 ? encH : s.outputHeight;
+      if (encW <= 0 && s.cubemapFaces && s.stereoMode == StereoMode::Stereo)
         metaW = s.outputWidth * 2;
       if (wantMeta) {
         notifyStage(L"vr_meta", finalOut);

@@ -2,19 +2,27 @@
 #include "UiStrings.hpp"
 #include "WinUiLayout.hpp"
 #include "HwSuggest.hpp"
+#include "mmdvr/Diagnostics.hpp"
 #include "mmdvr/VideoEncoder.hpp"
 #include <CommCtrl.h>
 #include <commdlg.h>
 #include <shellapi.h>
 #include <uxtheme.h>
+#include <atomic>
+#include <filesystem>
 #include <string>
+#include <thread>
+#include <vector>
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "uxtheme.lib")
 
+namespace fs = std::filesystem;
+
 namespace mmdvr {
 
 enum {
+  IDC_TABS = 1090,
   IDC_VRMODE = 1001,
   IDC_STEREO = 1002,
   IDC_QUALITY = 1003,
@@ -71,13 +79,91 @@ enum {
   IDC_LBL_ENCODE_CODEC = 1121,
   IDC_LBL_FACE_HINT = 1122,
   IDC_LBL_SAVE_WARN = 1123,
-  IDC_LBL_PROJECT = 1124
+  IDC_LBL_PROJECT = 1124,
+  IDC_REENCODE_HINT = 1301,
+  IDC_REENCODE_LBL_PROJECT = 1302,
+  IDC_REENCODE_PROJECT = 1303,
+  IDC_REENCODE_BROWSE = 1304,
+  IDC_REENCODE_LBL_FPS = 1305,
+  IDC_REENCODE_FPS = 1306,
+  IDC_REENCODE_LBL_CODEC = 1307,
+  IDC_REENCODE_CODEC = 1308,
+  IDC_REENCODE_LBL_AUDIO = 1309,
+  IDC_REENCODE_AUDIO = 1310,
+  IDC_REENCODE_BROWSE_AUDIO = 1311,
+  IDC_REENCODE_SPHERICAL = 1312,
+  IDC_REENCODE_LBL_VR = 1313,
+  IDC_REENCODE_VRMODE = 1314,
+  IDC_REENCODE_LBL_STEREO = 1315,
+  IDC_REENCODE_STEREO = 1316,
+  IDC_REENCODE_GO = 1317,
+  IDC_REENCODE_STATUS = 1318
 };
+
+constexpr UINT WM_REENCODE_DONE = WM_APP + 41;
 
 static RenderSettings* g_settings = nullptr;
 static bool g_ok = false;
 static HBRUSH g_yellowBrush = nullptr;
 static HFONT g_uiFont = nullptr;
+static std::atomic<bool> g_reencodeBusy{false};
+static std::wstring g_reencodeResult;
+static std::wstring g_reencodeError;
+static bool g_reencodeOk = false;
+
+static const int kRenderPageIds[] = {
+    IDC_LBL_VRMODE, IDC_VRMODE, IDC_LBL_STEREO, IDC_STEREO, IDC_LBL_QUALITY, IDC_QUALITY,
+    IDC_LBL_RES, IDC_RESOLUTION, IDC_LBL_SIZE, IDC_SIZEINFO, IDC_LBL_FPS, IDC_FPS,
+    IDC_LBL_THREADS, IDC_THREADS, IDC_LBL_THREADS_HINT, IDC_LBL_FACE, IDC_FACE,
+    IDC_LBL_WRITE, IDC_WRITE_THREADS, IDC_LBL_QUEUE, IDC_WRITE_QUEUE, IDC_LBL_FACE_HINT,
+    IDC_LBL_IPD, IDC_IPD, IDC_LBL_FSTART, IDC_FSTART, IDC_LBL_FEND, IDC_FEND,
+    IDC_LBL_PROJECT, IDC_PROJECT, IDC_LBL_OUT, IDC_OUTDIR, IDC_BROWSE, IDC_ENCODE,
+    IDC_LBL_ENCODE_CODEC, IDC_ENCODE_CODEC, IDC_LBL_AUDIO, IDC_AUDIO, IDC_BROWSE_AUDIO,
+    IDC_LBL_AUDIO_HINT, IDC_CUBEMAP, IDC_LBL_CUBEMAP_HINT, IDC_AUTOFILL, IDC_AUTOFILL_STATUS,
+    IDC_START, IDC_CAPTURE, IDC_LBL_HINT, IDC_LBL_RESNOTE, IDC_ISSUES_LEAD, IDC_ISSUES_LINK,
+    IDC_LBL_SPEC, IDC_LBL_PR, IDC_LBL_SAVE_WARN};
+static const int kReencodePageIds[] = {
+    IDC_REENCODE_HINT, IDC_REENCODE_LBL_PROJECT, IDC_REENCODE_PROJECT, IDC_REENCODE_BROWSE,
+    IDC_REENCODE_LBL_FPS, IDC_REENCODE_FPS, IDC_REENCODE_LBL_CODEC, IDC_REENCODE_CODEC,
+    IDC_REENCODE_LBL_AUDIO, IDC_REENCODE_AUDIO, IDC_REENCODE_BROWSE_AUDIO,
+    IDC_REENCODE_SPHERICAL, IDC_REENCODE_LBL_VR, IDC_REENCODE_VRMODE,
+    IDC_REENCODE_LBL_STEREO, IDC_REENCODE_STEREO, IDC_REENCODE_GO, IDC_REENCODE_STATUS};
+
+static void showDialogPage(HWND hDlg, int page) {
+  for (int id : kRenderPageIds) {
+    HWND c = GetDlgItem(hDlg, id);
+    if (c) ShowWindow(c, page == 0 ? SW_SHOW : SW_HIDE);
+  }
+  for (int id : kReencodePageIds) {
+    HWND c = GetDlgItem(hDlg, id);
+    if (c) ShowWindow(c, page == 1 ? SW_SHOW : SW_HIDE);
+  }
+  // Cancel stays visible on both pages.
+  HWND cancel = GetDlgItem(hDlg, IDC_CANCEL);
+  if (cancel) ShowWindow(cancel, SW_SHOW);
+}
+
+static std::wstring resolveFramesDir(std::wstring path) {
+  while (!path.empty() && (path.back() == L'\\' || path.back() == L'/'))
+    path.pop_back();
+  if (path.empty()) return {};
+  std::error_code ec;
+  auto hasPng = [&](const fs::path& dir) {
+    if (!fs::is_directory(dir, ec)) return false;
+    for (auto it = fs::directory_iterator(dir, ec); !ec && it != fs::directory_iterator(); ++it) {
+      if (!it->is_regular_file(ec)) continue;
+      auto name = it->path().filename().wstring();
+      if (name.rfind(L"frame_", 0) == 0 && it->path().extension() == L".png")
+        return true;
+    }
+    return false;
+  };
+  fs::path p(path);
+  if (hasPng(p)) return p.wstring();
+  if (hasPng(p / L"frames")) return (p / L"frames").wstring();
+  if (p.filename() == L"frames" && hasPng(p)) return p.wstring();
+  return {};
+}
 
 static HFONT ensureUiFont() {
   if (g_uiFont) return g_uiFont;
@@ -278,6 +364,30 @@ static void applyLabels(HWND hDlg) {
   setText(hDlg, IDC_LANG_JA, s.btnLangJa);
   setText(hDlg, IDC_LANG_EN, s.btnLangEn);
   setText(hDlg, IDC_LBL_SAVE_WARN, s.saveBeforeRenderWarn);
+  setText(hDlg, IDC_REENCODE_HINT, s.reencodeHint);
+  setText(hDlg, IDC_REENCODE_LBL_PROJECT, s.labelReencodeProject);
+  setText(hDlg, IDC_REENCODE_BROWSE, s.btnBrowse);
+  setText(hDlg, IDC_REENCODE_LBL_FPS, s.labelFps);
+  setText(hDlg, IDC_REENCODE_LBL_CODEC, s.labelEncodeCodec);
+  setText(hDlg, IDC_REENCODE_LBL_AUDIO, s.labelAudio);
+  setText(hDlg, IDC_REENCODE_BROWSE_AUDIO, s.btnBrowse);
+  setText(hDlg, IDC_REENCODE_SPHERICAL, s.chkReencodeSpherical);
+  setText(hDlg, IDC_REENCODE_LBL_VR, s.labelVrMode);
+  setText(hDlg, IDC_REENCODE_LBL_STEREO, s.labelStereo);
+  setText(hDlg, IDC_REENCODE_GO, s.btnReencode);
+
+  HWND tabs = GetDlgItem(hDlg, IDC_TABS);
+  if (tabs) {
+    TCITEMW item{};
+    item.mask = TCIF_TEXT;
+    wchar_t t0[64], t1[64];
+    wcsncpy_s(t0, s.tabRender, _TRUNCATE);
+    wcsncpy_s(t1, s.tabReencode, _TRUNCATE);
+    item.pszText = t0;
+    TabCtrl_SetItem(tabs, 0, &item);
+    item.pszText = t1;
+    TabCtrl_SetItem(tabs, 1, &item);
+  }
 
   int stereoSel = (int)SendDlgItemMessageW(hDlg, IDC_STEREO, CB_GETCURSEL, 0, 0);
   int qualitySel = (int)SendDlgItemMessageW(hDlg, IDC_QUALITY, CB_GETCURSEL, 0, 0);
@@ -293,6 +403,10 @@ static void applyLabels(HWND hDlg) {
   refillCombo(hDlg, IDC_QUALITY, qualityItems, 3, qualitySel);
   refillCombo(hDlg, IDC_RESOLUTION, resItems, 4, resSel);
   refillCombo(hDlg, IDC_ENCODE_CODEC, codecItems, 5, codecSel < 0 ? 0 : codecSel);
+  int reCodecSel = (int)SendDlgItemMessageW(hDlg, IDC_REENCODE_CODEC, CB_GETCURSEL, 0, 0);
+  int reStereoSel = (int)SendDlgItemMessageW(hDlg, IDC_REENCODE_STEREO, CB_GETCURSEL, 0, 0);
+  refillCombo(hDlg, IDC_REENCODE_CODEC, codecItems, 5, reCodecSel < 0 ? (int)EncodeCodec::Auto : reCodecSel);
+  refillCombo(hDlg, IDC_REENCODE_STEREO, stereoItems, 2, reStereoSel < 0 ? 1 : reStereoSel);
   const int faceSel = (int)SendDlgItemMessageW(hDlg, IDC_FACE, CB_GETCURSEL, 0, 0);
   refillFaceCombo(hDlg, comboIndexToFaceSize(faceSel));
   const int writeSel = (int)SendDlgItemMessageW(hDlg, IDC_WRITE_THREADS, CB_GETCURSEL, 0, 0);
@@ -350,7 +464,25 @@ static INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM) {
     SendDlgItemMessageW(hDlg, IDC_ENCODE_CODEC, CB_SETCURSEL, (int)s.encodeCodec, 0);
     setText(hDlg, IDC_AUDIO, s.audioPath);
     CheckDlgButton(hDlg, IDC_CUBEMAP, s.cubemapFaces ? BST_CHECKED : BST_UNCHECKED);
-    // Probe in background of init so Auto/NVENC labels reflect this PC's FFmpeg (same as MMD bats).
+    // Prefer the job folder (…\project) so frames\ resolves automatically.
+    if (!s.outputDir.empty())
+      setText(hDlg, IDC_REENCODE_PROJECT, s.outputDir);
+    else {
+      const std::wstring project =
+          s.jobName.empty() || s.jobName == L"__capture_only__" ? L"mmdvr_job" : s.jobName;
+      setText(hDlg, IDC_REENCODE_PROJECT, joinJobOutputDir(getText(hDlg, IDC_OUTDIR), project));
+    }
+    setText(hDlg, IDC_REENCODE_FPS, std::to_wstring((int)(s.fps > 0 ? s.fps : 60)));
+    SendDlgItemMessageW(hDlg, IDC_REENCODE_CODEC, CB_SETCURSEL, (int)s.encodeCodec, 0);
+    setText(hDlg, IDC_REENCODE_AUDIO, s.audioPath);
+    CheckDlgButton(hDlg, IDC_REENCODE_SPHERICAL, BST_CHECKED);
+    SendDlgItemMessageW(hDlg, IDC_REENCODE_VRMODE, CB_RESETCONTENT, 0, 0);
+    SendDlgItemMessageW(hDlg, IDC_REENCODE_VRMODE, CB_ADDSTRING, 0, (LPARAM)L"VR180");
+    SendDlgItemMessageW(hDlg, IDC_REENCODE_VRMODE, CB_ADDSTRING, 0, (LPARAM)L"VR360");
+    SendDlgItemMessageW(hDlg, IDC_REENCODE_VRMODE, CB_SETCURSEL, (s.vrMode == VrMode::VR360) ? 1 : 0, 0);
+    SendDlgItemMessageW(hDlg, IDC_REENCODE_STEREO, CB_SETCURSEL, (s.stereoMode == StereoMode::Stereo) ? 1 : 0, 0);
+    showDialogPage(hDlg, 0);
+    // Probe so Auto/NVENC reflect this PC's FFmpeg (smoke uses 512² for NVENC min size).
     VideoEncoder::probe(s.ffmpegPath);
     return TRUE;
   }
@@ -442,8 +574,123 @@ static INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM) {
       DestroyWindow(hDlg);
       return TRUE;
     }
+    case IDC_REENCODE_BROWSE: {
+      wchar_t file[MAX_PATH] = L"project";
+      OPENFILENAMEW ofn{};
+      ofn.lStructSize = sizeof(ofn);
+      ofn.hwndOwner = hDlg;
+      ofn.lpstrFile = file;
+      ofn.nMaxFile = MAX_PATH;
+      ofn.lpstrFilter = ui::kBrowseFilter;
+      ofn.Flags = OFN_PATHMUSTEXIST;
+      ofn.lpstrTitle = ui::t().browseProjectTitle;
+      if (GetSaveFileNameW(&ofn)) {
+        std::wstring p(file);
+        auto slash = p.find_last_of(L"\\/");
+        if (slash != std::wstring::npos) p = p.substr(0, slash);
+        setText(hDlg, IDC_REENCODE_PROJECT, p);
+      }
+      return TRUE;
+    }
+    case IDC_REENCODE_BROWSE_AUDIO: {
+      wchar_t file[MAX_PATH] = L"";
+      OPENFILENAMEW ofn{};
+      ofn.lStructSize = sizeof(ofn);
+      ofn.hwndOwner = hDlg;
+      ofn.lpstrFile = file;
+      ofn.nMaxFile = MAX_PATH;
+      ofn.lpstrFilter = ui::kAudioFilter;
+      ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+      ofn.lpstrTitle = ui::t().browseAudioTitle;
+      if (GetOpenFileNameW(&ofn))
+        setText(hDlg, IDC_REENCODE_AUDIO, file);
+      return TRUE;
+    }
+    case IDC_REENCODE_GO: {
+      if (g_reencodeBusy.load()) {
+        MessageBoxW(hDlg, ui::t().busy, ui::t().appName, MB_OK);
+        return TRUE;
+      }
+      const std::wstring projectPath = getText(hDlg, IDC_REENCODE_PROJECT);
+      const std::wstring frames = resolveFramesDir(projectPath);
+      if (frames.empty()) {
+        MessageBoxW(hDlg, ui::t().reencodeNoFrames, ui::t().appName, MB_OK | MB_ICONWARNING);
+        return TRUE;
+      }
+      fs::path framesPath(frames);
+      fs::path jobRoot =
+          (framesPath.filename() == L"frames") ? framesPath.parent_path() : framesPath;
+      const std::wstring jobName =
+          jobRoot.filename().empty() ? L"mmdvr_job" : jobRoot.filename().wstring();
+      const std::wstring outMp4 = (jobRoot / (jobName + L".mp4")).wstring();
+      const std::wstring tmpMp4 = (jobRoot / (jobName + L"_raw.mp4")).wstring();
+      double fps = _wtof(getText(hDlg, IDC_REENCODE_FPS).c_str());
+      if (fps < 1.0) fps = 60.0;
+      int codecIdx = (int)SendDlgItemMessageW(hDlg, IDC_REENCODE_CODEC, CB_GETCURSEL, 0, 0);
+      if (codecIdx < 0 || codecIdx > (int)EncodeCodec::Amf)
+        codecIdx = (int)EncodeCodec::Auto;
+      const EncodeCodec codec = (EncodeCodec)codecIdx;
+      const std::wstring audio = getText(hDlg, IDC_REENCODE_AUDIO);
+      const bool wantMeta = IsDlgButtonChecked(hDlg, IDC_REENCODE_SPHERICAL) == BST_CHECKED;
+      const VrMode vr =
+          SendDlgItemMessageW(hDlg, IDC_REENCODE_VRMODE, CB_GETCURSEL, 0, 0) == 1
+              ? VrMode::VR360
+              : VrMode::VR180;
+      const StereoMode stereo =
+          SendDlgItemMessageW(hDlg, IDC_REENCODE_STEREO, CB_GETCURSEL, 0, 0) == 1
+              ? StereoMode::Stereo
+              : StereoMode::Mono;
+      const std::wstring ffmpeg = g_settings ? g_settings->ffmpegPath : L"";
+
+      g_reencodeBusy = true;
+      g_reencodeOk = false;
+      g_reencodeResult.clear();
+      g_reencodeError.clear();
+      setText(hDlg, IDC_REENCODE_STATUS, ui::t().reencodeRunning);
+      EnableWindow(GetDlgItem(hDlg, IDC_REENCODE_GO), FALSE);
+
+      HWND hwnd = hDlg;
+      std::thread([=]() {
+        std::wstring err, fallback;
+        int encW = 0, encH = 0;
+        bool ok = VideoEncoder::encodeSequence(
+            frames, L"frame_%06d.png", tmpMp4, fps, ffmpeg, codec, audio, 0.0, &err, &fallback,
+            &encW, &encH);
+        std::wstring finalOut = outMp4;
+        if (ok && wantMeta) {
+          std::wstring metaErr;
+          if (!VideoEncoder::injectVrMetadata(tmpMp4, finalOut, vr, stereo, encW, encH, ffmpeg,
+                                              &metaErr)) {
+            Diagnostics::instance().warn("Re-encode VR metadata inject failed; keeping raw mp4");
+            finalOut = tmpMp4;
+            if (!metaErr.empty()) err += L"\n" + metaErr;
+          } else {
+            std::error_code ec;
+            fs::remove(tmpMp4, ec);
+          }
+        } else if (ok) {
+          std::error_code ec;
+          fs::remove(finalOut, ec);
+          fs::rename(tmpMp4, finalOut, ec);
+          if (ec) finalOut = tmpMp4;
+        }
+        g_reencodeOk = ok;
+        g_reencodeResult = finalOut;
+        g_reencodeError = err;
+        if (!fallback.empty()) {
+          if (!g_reencodeError.empty()) g_reencodeError += L"\n";
+          g_reencodeError += fallback;
+        }
+        PostMessageW(hwnd, WM_REENCODE_DONE, ok ? 1 : 0, 0);
+      }).detach();
+      return TRUE;
+    }
     case IDC_CANCEL:
     case IDCANCEL:
+      if (g_reencodeBusy.load()) {
+        MessageBoxW(hDlg, ui::t().reencodeRunning, ui::t().appName, MB_OK);
+        return TRUE;
+      }
       g_ok = false;
       DestroyWindow(hDlg);
       return TRUE;
@@ -461,7 +708,7 @@ bool ShowRenderDialog(HWND owner, RenderSettings& settings) {
   if (!g_yellowBrush)
     g_yellowBrush = CreateSolidBrush(RGB(255, 220, 60));
 
-  INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_LINK_CLASS};
+  INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_LINK_CLASS | ICC_TAB_CLASSES};
   InitCommonControlsEx(&icc);
 
   constexpr int kClientW = 700;
@@ -489,11 +736,38 @@ bool ShowRenderDialog(HWND owner, RenderSettings& settings) {
         return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
       }
     }
+    if (m == WM_REENCODE_DONE) {
+      g_reencodeBusy = false;
+      EnableWindow(GetDlgItem(hWnd, IDC_REENCODE_GO), TRUE);
+      wchar_t buf[1024]{};
+      if (w) {
+        std::swprintf(buf, 1024, ui::t().reencodeOkFmt, g_reencodeResult.c_str());
+        setText(hWnd, IDC_REENCODE_STATUS, buf);
+        MessageBoxW(hWnd, buf, ui::t().appName, MB_OK | MB_ICONINFORMATION);
+      } else {
+        std::swprintf(buf, 1024, ui::t().reencodeFailFmt, g_reencodeError.c_str());
+        setText(hWnd, IDC_REENCODE_STATUS, buf);
+        MessageBoxW(hWnd, buf, ui::t().appName, MB_OK | MB_ICONERROR);
+      }
+      return 0;
+    }
     if (m == WM_CREATE) {
       const DWORD st = WS_CHILD | WS_VISIBLE;
+      const DWORD stHidden = WS_CHILD; // re-encode page; shown on tab switch
       const DWORD stMulti = WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOPREFIX;
+      const DWORD stMultiH = WS_CHILD | SS_LEFT | SS_NOPREFIX;
       const DWORD stChk = st | BS_AUTOCHECKBOX | BS_MULTILINE | BS_TOP;
+      const DWORD stChkH = stHidden | BS_AUTOCHECKBOX | BS_MULTILINE | BS_TOP;
 
+      CreateWindowW(WC_TABCONTROLW, L"", st, 16, 6, 490, 26, hWnd, (HMENU)IDC_TABS, 0, 0);
+      {
+        TCITEMW item{};
+        item.mask = TCIF_TEXT;
+        item.pszText = const_cast<wchar_t*>(L"Render");
+        TabCtrl_InsertItem(GetDlgItem(hWnd, IDC_TABS), 0, &item);
+        item.pszText = const_cast<wchar_t*>(L"Re-encode");
+        TabCtrl_InsertItem(GetDlgItem(hWnd, IDC_TABS), 1, &item);
+      }
       CreateWindowW(L"BUTTON", L"日本語", st, 520, 8, 70, 22, hWnd, (HMENU)IDC_LANG_JA, 0, 0);
       CreateWindowW(L"BUTTON", L"English", st, 598, 8, 70, 22, hWnd, (HMENU)IDC_LANG_EN, 0, 0);
 
@@ -564,12 +838,42 @@ bool ShowRenderDialog(HWND owner, RenderSettings& settings) {
       CreateWindowW(L"STATIC", L"", st, 16, 788, 650, 16, hWnd, (HMENU)IDC_LBL_PR, 0, 0);
       CreateWindowW(L"STATIC", L"", stMulti, 16, 808, 650, 32, hWnd, (HMENU)IDC_LBL_SAVE_WARN, 0, 0);
 
+      // --- Re-encode tab (hidden until selected) ---
+      CreateWindowW(L"STATIC", L"", stMultiH, 16, 44, 650, 40, hWnd, (HMENU)IDC_REENCODE_HINT, 0, 0);
+      CreateWindowW(L"STATIC", L"", stHidden, 16, 96, 140, 18, hWnd, (HMENU)IDC_REENCODE_LBL_PROJECT, 0, 0);
+      CreateWindowW(L"EDIT", L"", stHidden | WS_BORDER | ES_AUTOHSCROLL, 170, 94, 460, 20, hWnd,
+                    (HMENU)IDC_REENCODE_PROJECT, 0, 0);
+      CreateWindowW(L"BUTTON", L"...", stHidden, 640, 94, 32, 20, hWnd, (HMENU)IDC_REENCODE_BROWSE, 0, 0);
+      CreateWindowW(L"STATIC", L"", stHidden, 16, 128, 140, 18, hWnd, (HMENU)IDC_REENCODE_LBL_FPS, 0, 0);
+      CreateWindowW(L"EDIT", L"", stHidden | WS_BORDER, 170, 126, 64, 20, hWnd, (HMENU)IDC_REENCODE_FPS, 0, 0);
+      CreateWindowW(L"STATIC", L"", stHidden, 16, 160, 140, 18, hWnd, (HMENU)IDC_REENCODE_LBL_CODEC, 0, 0);
+      CreateWindowW(L"COMBOBOX", L"", stHidden | CBS_DROPDOWNLIST, 170, 158, 500, 200, hWnd,
+                    (HMENU)IDC_REENCODE_CODEC, 0, 0);
+      CreateWindowW(L"STATIC", L"", stHidden, 16, 192, 140, 18, hWnd, (HMENU)IDC_REENCODE_LBL_AUDIO, 0, 0);
+      CreateWindowW(L"EDIT", L"", stHidden | WS_BORDER | ES_AUTOHSCROLL, 170, 190, 430, 20, hWnd,
+                    (HMENU)IDC_REENCODE_AUDIO, 0, 0);
+      CreateWindowW(L"BUTTON", L"...", stHidden, 610, 190, 32, 20, hWnd, (HMENU)IDC_REENCODE_BROWSE_AUDIO,
+                    0, 0);
+      CreateWindowW(L"BUTTON", L"", stChkH, 170, 224, 500, 28, hWnd, (HMENU)IDC_REENCODE_SPHERICAL, 0, 0);
+      CreateWindowW(L"STATIC", L"", stHidden, 16, 264, 140, 18, hWnd, (HMENU)IDC_REENCODE_LBL_VR, 0, 0);
+      CreateWindowW(L"COMBOBOX", L"", stHidden | CBS_DROPDOWNLIST, 170, 262, 200, 200, hWnd,
+                    (HMENU)IDC_REENCODE_VRMODE, 0, 0);
+      CreateWindowW(L"STATIC", L"", stHidden, 390, 264, 80, 18, hWnd, (HMENU)IDC_REENCODE_LBL_STEREO, 0, 0);
+      CreateWindowW(L"COMBOBOX", L"", stHidden | CBS_DROPDOWNLIST, 480, 262, 190, 200, hWnd,
+                    (HMENU)IDC_REENCODE_STEREO, 0, 0);
+      CreateWindowW(L"BUTTON", L"", stHidden, 16, 310, 300, 32, hWnd, (HMENU)IDC_REENCODE_GO, 0, 0);
+      CreateWindowW(L"STATIC", L"", stMultiH, 16, 356, 650, 80, hWnd, (HMENU)IDC_REENCODE_STATUS, 0, 0);
+
       DlgProc(hWnd, WM_INITDIALOG, 0, 0);
       ui_layout::FitClientSize(hWnd, 700, 850);
       return 0;
     }
     if (m == WM_NOTIFY) {
       auto* hdr = reinterpret_cast<LPNMHDR>(l);
+      if (hdr && hdr->idFrom == IDC_TABS && hdr->code == TCN_SELCHANGE) {
+        showDialogPage(hWnd, TabCtrl_GetCurSel(hdr->hwndFrom));
+        return 0;
+      }
       if (hdr && hdr->idFrom == IDC_ISSUES_LINK &&
           (hdr->code == NM_CLICK || hdr->code == NM_RETURN)) {
         auto* link = reinterpret_cast<PNMLINK>(l);

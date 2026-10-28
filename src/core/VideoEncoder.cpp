@@ -1,6 +1,9 @@
 #include "mmdvr/VideoEncoder.hpp"
 #include "mmdvr/SphericalMp4Inject.hpp"
 #include "mmdvr/Diagnostics.hpp"
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <mutex>
@@ -178,11 +181,40 @@ static std::wstring implArgs(EncImpl i) {
   }
 }
 
-// Conservative HW max edge. Soft encoders (libx265/libx264) are unlimited here.
+// x265 Level 7.2 MaxLumaPs (16384×8704). Stereo 8K SBS 30720×7680 exceeds this;
+// H.264 cannot take that frame either — never "fall back" to libx264 for it.
+static constexpr long long kHevcMaxLumaSamples = 142606336LL;
+// Practical libx264 ceiling (level 6.2-ish); above this libx264 rejects the size.
+static constexpr long long kH264MaxLumaSamples = 35651584LL;
+
+static int evenDown(int v) { return (v > 2) ? (v & ~1) : 2; }
+
+static void fitLumaEncodeSize(int srcW, int srcH, long long maxLuma, int& outW, int& outH) {
+  outW = srcW;
+  outH = srcH;
+  if (srcW <= 0 || srcH <= 0) return;
+  const long long luma = static_cast<long long>(srcW) * static_cast<long long>(srcH);
+  if (luma <= maxLuma && (srcW % 2 == 0) && (srcH % 2 == 0)) return;
+  const double scale = std::sqrt(static_cast<double>(maxLuma) / static_cast<double>(luma));
+  outW = evenDown(static_cast<int>(std::floor(srcW * scale)));
+  outH = evenDown(static_cast<int>(std::floor(srcH * scale)));
+  while (outW > 2 && outH > 2 &&
+         static_cast<long long>(outW) * static_cast<long long>(outH) > maxLuma) {
+    if (outW >= outH) outW = evenDown(outW - 2);
+    else outH = evenDown(outH - 2);
+  }
+}
+
+// Largest even size ≤ Level 7.2 luma budget, aspect preserved.
+static void fitHevcEncodeSize(int srcW, int srcH, int& outW, int& outH) {
+  fitLumaEncodeSize(srcW, srcH, kHevcMaxLumaSamples, outW, outH);
+}
+
+// Conservative HW max edge.
 static int implMaxEdge(EncImpl i) {
   switch (i) {
   case EncImpl::HevcNvenc:
-    return 8192; // common NVENC HEVC cap; 8K equirect falls to libx265
+    return 8192; // common NVENC HEVC cap; huge equirect falls to libx265
   case EncImpl::HevcQsv:
   case EncImpl::HevcAmf:
     return 8192;
@@ -196,10 +228,40 @@ static int implMaxEdge(EncImpl i) {
   }
 }
 
+// Per-encoder fit: HEVC luma cap, then HW max-edge (NVENC/QSV/AMF ≈8192).
+static void fitImplEncodeSize(EncImpl i, int srcW, int srcH, int& outW, int& outH) {
+  outW = srcW;
+  outH = srcH;
+  if (srcW <= 0 || srcH <= 0) return;
+  switch (i) {
+  case EncImpl::Libx265:
+  case EncImpl::HevcNvenc:
+  case EncImpl::HevcQsv:
+  case EncImpl::HevcAmf:
+    fitHevcEncodeSize(srcW, srcH, outW, outH);
+    break;
+  case EncImpl::Libx264:
+  case EncImpl::H264Nvenc:
+  case EncImpl::H264Qsv:
+  case EncImpl::H264Amf:
+    fitLumaEncodeSize(srcW, srcH, kH264MaxLumaSamples, outW, outH);
+    break;
+  }
+  const int maxEdge = implMaxEdge(i);
+  if (maxEdge >= 0x7fffffff) return;
+  if (outW <= maxEdge && outH <= maxEdge) return;
+  const double s = (std::min)(maxEdge / static_cast<double>(outW),
+                              maxEdge / static_cast<double>(outH));
+  outW = evenDown(static_cast<int>(std::floor(outW * s)));
+  outH = evenDown(static_cast<int>(std::floor(outH * s)));
+}
+
 static bool implSupportsSize(EncImpl i, int frameW, int frameH) {
   if (frameW <= 0 || frameH <= 0) return true;
-  if (i == EncImpl::Libx265 || i == EncImpl::Libx264) return true;
   if ((frameW & 1) || (frameH & 1)) return false;
+  const long long luma = static_cast<long long>(frameW) * static_cast<long long>(frameH);
+  if (i == EncImpl::Libx265) return luma <= kHevcMaxLumaSamples;
+  if (i == EncImpl::Libx264) return luma <= kH264MaxLumaSamples;
   const int maxEdge = implMaxEdge(i);
   return frameW <= maxEdge && frameH <= maxEdge;
 }
@@ -241,10 +303,12 @@ static bool smokeTestImpl(const std::wstring& ff, EncImpl impl) {
   auto outPath = fs::temp_directory_path() / L"mmdvr_hw_smoke.mp4";
   std::error_code ec;
   fs::remove(outPath, ec);
+  // NVENC rejects tiny frames ("below minimum"); 512² is safely above the floor
+  // and still cheap for a one-frame probe.
   std::wstringstream cmd;
   cmd << quote(ff)
       << L" -hide_banner -loglevel error -y"
-      << L" -f lavfi -i color=c=black:s=128x128:d=0.2:r=30 -frames:v 1"
+      << L" -f lavfi -i color=c=black:s=512x512:d=0.2:r=30 -frames:v 1"
       << implArgs(impl)
       << quote(outPath.wstring());
   std::wstring err;
@@ -308,11 +372,14 @@ static std::vector<EncImpl> buildCandidates(EncodeCodec requested, const FfmpegC
 
   std::vector<EncImpl> out;
   for (auto i : raw) {
-    if (!implAvailable(i, caps) && !(i == EncImpl::Libx264)) continue;
+    if (!implAvailable(i, caps) && i != EncImpl::Libx264) continue;
     if (!ignoreSize && !implSupportsSize(i, frameW, frameH)) continue;
     appendUnique(out, i);
   }
-  if (out.empty()) appendUnique(out, EncImpl::Libx264);
+  // Prefer staying on HEVC: if nothing fits the native size, caller will scale
+  // down to Level 7.2 and retry with libx265 — do not invent a doomed libx264.
+  if (out.empty() && caps.hasLibx265) appendUnique(out, EncImpl::Libx265);
+  else if (out.empty()) appendUnique(out, EncImpl::Libx264);
   return out;
 }
 
@@ -561,8 +628,12 @@ bool VideoEncoder::encodeSequence(
     const std::wstring& audioPath,
     double audioStartSec,
     std::wstring* errorOut,
-    std::wstring* fallbackOut) {
+    std::wstring* fallbackOut,
+    int* encodedW,
+    int* encodedH) {
   if (fallbackOut) fallbackOut->clear();
+  if (encodedW) *encodedW = 0;
+  if (encodedH) *encodedH = 0;
   auto caps = probe(ffmpegPath);
   auto ff = caps.path.empty() ? resolveFfmpeg(ffmpegPath) : caps.path;
   int startNum = findFirstSequenceIndex(sequenceDir);
@@ -578,8 +649,30 @@ bool VideoEncoder::encodeSequence(
     }
   }
 
+  // Soft HEVC Level-7.2 fit used to decide Auto candidate list (keep high-res
+  // libx265 when HW would need a much smaller scale).
+  int softW = frameW, softH = frameH;
+  fitHevcEncodeSize(frameW, frameH, softW, softH);
+
   const EncImpl preferred = preferredImpl(codec, caps);
-  auto candidates = buildCandidates(codec, caps, frameW, frameH, false);
+  const bool forceHwFamily =
+      codec == EncodeCodec::Nvenc || codec == EncodeCodec::Qsv || codec == EncodeCodec::Amf;
+  // Explicit NVENC/QSV/AMF: ignore native size so we can scale into the HW cap.
+  // Auto: filter by soft HEVC size so NVENC is only picked when it fits that size.
+  auto candidates =
+      buildCandidates(codec, caps, forceHwFamily ? 0 : softW, forceHwFamily ? 0 : softH,
+                      forceHwFamily);
+  if (caps.hasLibx265) {
+    std::vector<EncImpl> hevcOnly;
+    for (auto i : candidates) {
+      if (i == EncImpl::H264Nvenc || i == EncImpl::H264Qsv || i == EncImpl::H264Amf ||
+          i == EncImpl::Libx264)
+        continue;
+      hevcOnly.push_back(i);
+    }
+    if (!hevcOnly.empty()) candidates.swap(hevcOnly);
+  }
+
   auto setFallback = [&](EncImpl from, EncImpl to) {
     if (!fallbackOut || from == to) return;
     *fallbackOut = std::wstring(implLabel(from)) + L" → " + implLabel(to);
@@ -595,7 +688,31 @@ bool VideoEncoder::encodeSequence(
     if (errorOut) *errorOut += L"audio missing: " + audioPath + L"\n";
   }
 
-  auto buildCmd = [&](EncImpl useImpl) {
+  auto tryEncode = [&](EncImpl useImpl) {
+    int w = frameW, h = frameH;
+    fitImplEncodeSize(useImpl, frameW, frameH, w, h);
+    if (encodedW) *encodedW = w;
+    if (encodedH) *encodedH = h;
+    if (frameW > 0 && (w != frameW || h != frameH)) {
+      char msg[192];
+      std::snprintf(msg, sizeof(msg),
+                    "FFmpeg scale for %s: %dx%d → %dx%d (PNG stays full-res)",
+                    (useImpl == EncImpl::Libx265)             ? "libx265/Level7.2"
+                    : (useImpl == EncImpl::HevcNvenc)         ? "HEVC NVENC"
+                    : (useImpl == EncImpl::HevcQsv)           ? "HEVC QSV"
+                    : (useImpl == EncImpl::HevcAmf)           ? "HEVC AMF"
+                                                              : "encoder limit",
+                    frameW, frameH, w, h);
+      Diagnostics::instance().warn(msg);
+      if (fallbackOut) {
+        wchar_t note[128];
+        std::swprintf(note, 128, L"%s (%dx%d→%dx%d)", implLabel(useImpl), frameW, frameH, w, h);
+        if (fallbackOut->empty())
+          *fallbackOut = note;
+        else if (fallbackOut->find(L"→") != std::wstring::npos)
+          *fallbackOut += std::wstring(L" · ") + note;
+      }
+    }
     std::wstringstream cmd;
     cmd << quote(ff)
         << L" -y -framerate " << fps
@@ -606,25 +723,20 @@ bool VideoEncoder::encodeSequence(
         cmd << L" -ss " << audioStartSec;
       cmd << L" -i " << quote(audioPath);
     }
+    if (frameW > 0 && (w != frameW || h != frameH))
+      cmd << L" -vf scale=" << w << L":" << h;
     cmd << implArgs(useImpl);
-    if (hasAudio) {
-      // Map video from input0, audio from input1; cut to the shorter stream (usually video).
+    if (hasAudio)
       cmd << L" -map 0:v:0 -map 1:a:0? -c:a aac -b:a 192k -shortest ";
-    }
     cmd << quote(outMp4);
-    return cmd.str();
-  };
-
-  auto tryEncode = [&](EncImpl useImpl) {
-    const auto cmd = buildCmd(useImpl);
-    Diagnostics::instance().infoW(L"FFmpeg: " + cmd);
+    Diagnostics::instance().infoW(L"FFmpeg: " + cmd.str());
     Diagnostics::instance().info(
         std::string("FFmpeg start_number=") + std::to_string(startNum) +
         " impl=" + std::to_string((int)useImpl) + (hasAudio ? " +audio" : " video-only"));
-    return runFfmpeg(cmd, sequenceDir, errorOut);
+    return runFfmpeg(cmd.str(), sequenceDir, errorOut);
   };
 
-  EncImpl tried = candidates.empty() ? EncImpl::Libx264 : candidates.front();
+  EncImpl tried = candidates.empty() ? EncImpl::Libx265 : candidates.front();
   for (size_t i = 0; i < candidates.size(); ++i) {
     if (i > 0) {
       Diagnostics::instance().warn(
@@ -637,6 +749,9 @@ bool VideoEncoder::encodeSequence(
     }
     tried = candidates[i];
     if (tryEncode(tried)) return true;
+  }
+  if (errorOut) {
+    *errorOut += L"\nEncode failed; PNG sequence is intact — use the Re-encode tab.\n";
   }
   return false;
 }
