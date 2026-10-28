@@ -189,6 +189,17 @@ bool D3D9CaptureBackend::hasStagedSurface() const {
   return stagedReady_ && stagedGpu_;
 }
 
+bool D3D9CaptureBackend::stagedSize(int& outW, int& outH) const {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (!stagedReady_ || !stagedGpu_) {
+    outW = outH = 0;
+    return false;
+  }
+  outW = stagedW_;
+  outH = stagedH_;
+  return true;
+}
+
 bool D3D9CaptureBackend::ownsSurface(IDirect3DSurface9* surface) const {
   std::lock_guard<std::mutex> lock(mu_);
   return surface && (surface == poolGpu_ || surface == poolSys_ || surface == stagedGpu_);

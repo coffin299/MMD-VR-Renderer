@@ -113,6 +113,12 @@ const Bundle kJa{
   L"English",
   L"レンダリング実行前に必ずプロジェクトを保存してください",
   L"エンコーダ切替: %s\n（解像度制限またはHWエンコード失敗のため）",
+  L"未完了のジョブがあります。\n\n"
+  L"次フレーム: %d（完了済 %d / 予定 %d）\n"
+  L"フォルダ:\n%s\n\n"
+  L"はい = 途中から再開\n"
+  L"いいえ = 最初からやり直し\n"
+  L"キャンセル = 中止",
 };
 
 const Bundle kEn{
@@ -215,6 +221,12 @@ const Bundle kEn{
   L"English",
   L"Always save your project before rendering",
   L"Encoder fallback: %s\n(resolution limit or HW encode failure)",
+  L"An unfinished job was found.\n\n"
+  L"Next frame: %d (done %d / planned %d)\n"
+  L"Folder:\n%s\n\n"
+  L"Yes = resume from there\n"
+  L"No = restart from the beginning\n"
+  L"Cancel = abort",
 };
 
 } // namespace

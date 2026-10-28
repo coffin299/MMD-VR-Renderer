@@ -18,6 +18,10 @@ public:
 
   static bool save(const std::wstring& path, const JobStateData& data);
   static bool load(const std::wstring& path, JobStateData& out);
+
+  // First missing frame_XXXXXX.png under pngDir (crash-safe resume point).
+  // Returns frameEnd+1 when the range is complete.
+  static int firstMissingPngFrame(const std::wstring& pngDir, int frameStart, int frameEnd);
 };
 
 } // namespace mmdvr

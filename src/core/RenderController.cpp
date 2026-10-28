@@ -400,13 +400,32 @@ bool RenderController::start(ProgressCallback cb) {
       " face=" + std::to_string(s.faceSize) +
       " pngWriters=" + std::to_string(std::max(1, s.writeThreads)) +
       " pngQueue=" + (s.writeQueueMax > 0 ? std::to_string(s.writeQueueMax) : std::string("unlimited")));
+  if (s.cubemapFaces && s.faceSize > 4096) {
+    Diagnostics::instance().warn(
+        "faceSize > 4096 is very heavy on MMD/MME and has caused long-job crashes; "
+        "prefer 2048–4096 unless you have verified stability");
+  }
 
   int start = s.frameStart;
   int end = s.frameEnd;
+  // Crash-safe resume: prefer first missing PNG (async writers may lag job.json).
   JobStateData existing;
-  if (JobState::load(JobState::defaultPath(s.outputDir), existing) && !existing.finished) {
-    if (existing.lastCompletedFrame >= start)
-      start = existing.lastCompletedFrame + 1;
+  const bool haveJob = JobState::load(JobState::defaultPath(s.outputDir), existing) && !existing.finished;
+  const int missingPng =
+      JobState::firstMissingPngFrame(s.pngSequenceDir(), s.frameStart, end);
+  int resumeAt = missingPng;
+  if (haveJob && existing.lastCompletedFrame >= s.frameStart) {
+    // If JSON is behind PNGs (rare), keep PNG; if JSON is ahead of flushed PNGs, use PNG.
+    const int afterJson = existing.lastCompletedFrame + 1;
+    resumeAt = (std::min)(missingPng, afterJson);
+    if (missingPng < afterJson) {
+      Diagnostics::instance().info(
+          "Resume: job.json ahead of PNG flush; continuing from first missing PNG " +
+          std::to_string(missingPng));
+    }
+  }
+  if (resumeAt > start) {
+    start = resumeAt;
     Diagnostics::instance().info("Resuming job from frame " + std::to_string(start));
   }
   if (end < start) end = start;

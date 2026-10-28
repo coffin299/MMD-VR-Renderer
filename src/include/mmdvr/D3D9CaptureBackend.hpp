@@ -31,6 +31,8 @@ public:
   bool stageSurface(IDirect3DSurface9* source);
   bool captureStaged(ImageBuffer& out, int maxSide = 0);
   bool hasStagedSurface() const;
+  // Returns staged copy dimensions when ready.
+  bool stagedSize(int& outW, int& outH) const;
   bool ownsSurface(IDirect3DSurface9* surface) const;
   void clearStagedSurface();
   void setViewportCrop(int x, int y, int w, int h);

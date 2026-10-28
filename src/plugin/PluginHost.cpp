@@ -7,6 +7,7 @@
 #include "MmdWaveDetect.hpp"
 #include "mmdvr/Diagnostics.hpp"
 #include "mmdvr/ImageSequenceWriter.hpp"
+#include "mmdvr/JobState.hpp"
 #include "mmdvr/MathUtil.hpp"
 #include <shellapi.h>
 #include <thread>
@@ -193,52 +194,69 @@ void PluginHost::onBeforeStretchRect(
 void PluginHost::stagePreOverlaySource(
     IDirect3DDevice9* device, IDirect3DSurface9* source, const char* operation) {
   if (!device || !source || device != device_) return;
-  bool needLog = false;
   {
     std::lock_guard<std::mutex> lock(redrawMu_);
     // The first Present after camera edits is deliberately discarded. Its
     // screen-capture copy is likewise stale and must not become a cubemap face.
     if (!wantCapture_ || skipCaptures_ > 0) return;
-    needLog = !preOverlayCandidateLogged_;
   }
   // Do not recursively capture our own staging/readback surfaces.
-  if (capture_.hasStagedSurface() || capture_.ownsSurface(source)) return;
+  if (capture_.ownsSurface(source)) return;
 
   D3DSURFACE_DESC desc{};
   if (FAILED(source->GetDesc(&desc)) || desc.Width == 0 || desc.Height == 0)
     return;
 
-  // MMD's screen capture is its output-sized color surface. In practice MMD
-  // versions use either GetRenderTargetData or a GPU-only StretchRect here;
-  // both happen before editor overlays. Ignore ray-mmd shadow/G-buffer copies,
-  // which are normally substantially smaller or differently sized than the
-  // presentation backbuffer.
-  if (bbW_ > 0 && bbH_ > 0) {
-    const int toleranceW = (std::max)(32, bbW_ / 8);
-    const int toleranceH = (std::max)(32, bbH_ / 8);
-    if (std::abs(static_cast<int>(desc.Width) - bbW_) > toleranceW ||
-        std::abs(static_cast<int>(desc.Height) - bbH_) > toleranceH) {
-      return;
+  // Prefer MMD output-size square (faceSize) when cubemap is configured. Matching
+  // only the window backbuffer caused 7680 jobs to silently stage 1920×1080.
+  const auto settings = controller_.settings();
+  const int faceTarget =
+      (settings.cubemapFaces && mmdOutputSizeConfigured_) ? settings.resolvedFaceSize() : 0;
+
+  auto scoreCandidate = [&](int w, int h) -> int {
+    if (faceTarget > 0) {
+      const int tol = (std::max)(32, faceTarget / 16);
+      if (std::abs(w - faceTarget) <= tol && std::abs(h - faceTarget) <= tol)
+        return 100000 + w; // true cubemap face render target
     }
+    if (bbW_ > 0 && bbH_ > 0) {
+      const int toleranceW = (std::max)(32, bbW_ / 8);
+      const int toleranceH = (std::max)(32, bbH_ / 8);
+      if (std::abs(w - bbW_) <= toleranceW && std::abs(h - bbH_) <= toleranceH)
+        return 1000 + w; // window / presentation fallback
+    }
+    return -1;
+  };
+
+  const int score = scoreCandidate(static_cast<int>(desc.Width), static_cast<int>(desc.Height));
+  if (score < 0) return;
+
+  if (capture_.hasStagedSurface()) {
+    int sw = 0, sh = 0;
+    if (capture_.stagedSize(sw, sh) && scoreCandidate(sw, sh) >= score)
+      return; // keep equal-or-better staged copy
   }
 
   if (!capture_.stageSurface(source)) return;
 
   bool logCandidate = false;
-  if (needLog) {
+  {
     std::lock_guard<std::mutex> lock(redrawMu_);
     if (!preOverlayCandidateLogged_) {
       preOverlayCandidateLogged_ = true;
       logCandidate = true;
+    } else if (score >= 100000) {
+      logCandidate = true; // log upgrade to true face-sized RT
     }
   }
   if (logCandidate) {
-    char msg[160];
+    char msg[192];
     std::snprintf(msg, sizeof(msg),
-                  "Pre-overlay source staged from %s: %ux%u fmt=%u",
+                  "Pre-overlay source staged from %s: %ux%u fmt=%u%s",
                   operation ? operation : "?",
                   static_cast<unsigned>(desc.Width), static_cast<unsigned>(desc.Height),
-                  static_cast<unsigned>(desc.Format));
+                  static_cast<unsigned>(desc.Format),
+                  score >= 100000 ? " (face-sized)" : " (backbuffer-sized)");
     Diagnostics::instance().info(msg);
   }
 }
@@ -904,8 +922,61 @@ void PluginHost::startRenderJob(const RenderSettings& settings) {
     MessageBoxW(mmdHwnd_, ui::t().renderBusy, ui::t().appName, MB_OK);
     return;
   }
-  controller_.setSettings(settings);
+  RenderSettings s = settings;
   HWND hwnd = mmdHwnd_;
+
+  // Crash / cancel resume: same project folder + unfinished job.json → ask.
+  {
+    JobStateData existing;
+    const std::wstring jobPath = JobState::defaultPath(s.outputDir);
+    if (JobState::load(jobPath, existing) && !existing.finished &&
+        existing.lastCompletedFrame >= s.frameStart) {
+      const int missingPng =
+          JobState::firstMissingPngFrame(s.pngSequenceDir(), s.frameStart, s.frameEnd);
+      const int afterJson = existing.lastCompletedFrame + 1;
+      const int resumeAt = (std::min)(missingPng, afterJson);
+      const int planned =
+          existing.totalFrames > 0
+              ? existing.totalFrames
+              : (s.frameEnd >= s.frameStart ? (s.frameEnd - s.frameStart + 1) : 0);
+      if (resumeAt > s.frameStart) {
+        wchar_t prompt[900];
+        std::swprintf(prompt, 900, ui::t().resumeJobPromptFmt, resumeAt,
+                      existing.lastCompletedFrame, planned, s.outputDir.c_str());
+        const int choice =
+            MessageBoxW(hwnd, prompt, ui::t().appName, MB_YESNOCANCEL | MB_ICONQUESTION);
+        if (choice == IDCANCEL) {
+          jobThreadRunning_.store(false);
+          return;
+        }
+        if (choice == IDYES) {
+          // Keep user's new end frame / encode toggles, restore capture-critical settings.
+          const int frameEndUi = s.frameEnd;
+          const bool encodeUi = s.encodeVideo;
+          const EncodeCodec codecUi = s.encodeCodec;
+          const std::wstring audioUi = s.audioPath;
+          const std::wstring ffmpegUi = s.ffmpegPath;
+          s = existing.settings;
+          s.outputDir = settings.outputDir;
+          s.jobName = settings.jobName;
+          if (frameEndUi >= 0) s.frameEnd = frameEndUi;
+          s.encodeVideo = encodeUi;
+          s.encodeCodec = codecUi;
+          s.audioPath = audioUi;
+          s.ffmpegPath = ffmpegUi;
+          Diagnostics::instance().infoW(
+              L"User chose resume; next frame ≈ " + std::to_wstring(resumeAt));
+        } else {
+          // Restart: drop checkpoint so RenderController starts at frameStart.
+          std::error_code ec;
+          fs::remove(jobPath, ec);
+          Diagnostics::instance().info("User chose restart; cleared job.json checkpoint");
+        }
+      }
+    }
+  }
+
+  controller_.setSettings(s);
   // Progress dialog owns a worker thread + message loop (cancel / pause / ETA).
   bool ok = RunProgressDialog(hwnd, controller_);
   jobThreadRunning_.store(false);

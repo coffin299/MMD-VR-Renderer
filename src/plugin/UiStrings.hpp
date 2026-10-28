@@ -113,6 +113,8 @@ struct Bundle {
   const wchar_t* saveBeforeRenderWarn;
   // %s = e.g. "NVENC → libx264"
   const wchar_t* encodeFallbackFmt;
+  // Resume prompt: nextFrame, lastDone, total, projectFolder
+  const wchar_t* resumeJobPromptFmt;
 };
 
 const Bundle& t();
