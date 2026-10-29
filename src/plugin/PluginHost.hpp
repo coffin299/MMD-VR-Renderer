@@ -104,6 +104,8 @@ private:
   void observeCameraFromDevice(IDirect3DDevice9* device);
   void stagePreOverlaySource(IDirect3DDevice9* device, IDirect3DSurface9* source,
                              const char* operation);
+  // Arms Present/pre-overlay capture and skips MMD's Local XYZ gizmo draw.
+  void setCaptureArmed(bool armed);
   static bool isPerspectiveProjection(const D3DMATRIX* m);
 };
 

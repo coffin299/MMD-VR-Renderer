@@ -2,6 +2,7 @@
 #include "PluginHost.hpp"
 #include "mmdvr/Diagnostics.hpp"
 #include <atomic>
+#include <cstring>
 
 #if MMDVR_HAS_MINHOOK
 #include <MinHook.h>
@@ -23,6 +24,7 @@ using SetRenderTarget_t = HRESULT (WINAPI*)(IDirect3DDevice9*, DWORD, IDirect3DS
 using BeginScene_t = HRESULT (WINAPI*)(IDirect3DDevice9*);
 using DrawPrimitive_t = HRESULT (WINAPI*)(IDirect3DDevice9*, D3DPRIMITIVETYPE, UINT, UINT);
 using DrawIndexedPrimitive_t = HRESULT (WINAPI*)(IDirect3DDevice9*, D3DPRIMITIVETYPE, INT, UINT, UINT, UINT, UINT);
+using MmdDrawLocalGizmo_t = void (*)();
 
 static CreateDevice_t g_CreateDevice = nullptr;
 static Present_t g_Present = nullptr;
@@ -35,11 +37,21 @@ static SetRenderTarget_t g_SetRenderTarget = nullptr;
 static BeginScene_t g_BeginScene = nullptr;
 static DrawPrimitive_t g_DrawPrimitive = nullptr;
 static DrawIndexedPrimitive_t g_DrawIndexedPrimitive = nullptr;
+static MmdDrawLocalGizmo_t g_MmdDrawLocalGizmo = nullptr;
 static bool g_hooksInstalled = false;
+static bool g_mmdGizmoHookInstalled = false;
 static int g_presentDepth = 0;
 
 // VR face capture: rewrite main-camera VIEW/PROJ for the whole Present cycle.
 static std::atomic<bool> g_transformOverride{false};
+static std::atomic<bool> g_suppressMmdLocalGizmo{false};
+
+// MMD 9.32 x64 — drawLocalTransformGizmo (lower-right Local X/Y/Z icons).
+// RVA is stable for this build; MMD is effectively frozen.
+constexpr uintptr_t kMmdLocalGizmoRva = 0x225C0;
+constexpr unsigned char kMmdLocalGizmoSig[] = {
+    0x40, 0x55, 0x56, 0x48, 0x8D, 0x6C, 0x24, 0xB1,
+    0x48, 0x81, 0xEC, 0xD8, 0x00, 0x00, 0x00, 0x48};
 
 void SetTransformOverrideEnabled(bool on) {
   g_transformOverride.store(on, std::memory_order_release);
@@ -47,6 +59,41 @@ void SetTransformOverrideEnabled(bool on) {
 
 bool IsTransformOverrideEnabled() {
   return g_transformOverride.load(std::memory_order_acquire);
+}
+
+void SetMmdLocalGizmoSuppress(bool on) {
+  g_suppressMmdLocalGizmo.store(on, std::memory_order_release);
+}
+
+static void Hook_MmdDrawLocalGizmo() {
+  if (g_suppressMmdLocalGizmo.load(std::memory_order_acquire))
+    return;
+  g_MmdDrawLocalGizmo();
+}
+
+static void tryInstallMmdLocalGizmoHook() {
+  if (g_mmdGizmoHookInstalled) return;
+  HMODULE mmd = GetModuleHandleW(nullptr);
+  if (!mmd) return;
+  auto* target = reinterpret_cast<unsigned char*>(
+      reinterpret_cast<uintptr_t>(mmd) + kMmdLocalGizmoRva);
+  // MMD 9.32 x64 image is large enough that this RVA stays inside .text.
+  if (std::memcmp(target, kMmdLocalGizmoSig, sizeof(kMmdLocalGizmoSig)) != 0) {
+    Diagnostics::instance().warn(
+        "MMD Local XYZ gizmo hook skipped (signature mismatch; pixel cleanup only)");
+    g_mmdGizmoHookInstalled = true; // do not retry every Present
+    return;
+  }
+  if (MH_CreateHook(target, &Hook_MmdDrawLocalGizmo,
+                    reinterpret_cast<LPVOID*>(&g_MmdDrawLocalGizmo)) != MH_OK ||
+      MH_EnableHook(target) != MH_OK) {
+    Diagnostics::instance().warn("MMD Local XYZ gizmo MinHook install failed");
+    g_mmdGizmoHookInstalled = true;
+    return;
+  }
+  g_mmdGizmoHookInstalled = true;
+  Diagnostics::instance().info(
+      "Hooked MMD Local XYZ gizmo draw (skip while capture armed)");
 }
 
 static void* vtable_slot(void* obj, size_t index) {
@@ -183,6 +230,7 @@ void HookDirect3D9(IDirect3D9* d3d) {
   if (once || !d3d) return;
   once = true;
   MH_Initialize();
+  tryInstallMmdLocalGizmoHook();
   void* pCreate = vtable_slot(d3d, 16);
   MH_CreateHook(pCreate, &Hook_CreateDevice, (LPVOID*)&g_CreateDevice);
   MH_EnableHook(pCreate);
@@ -193,6 +241,7 @@ void HookDirect3D9(IDirect3D9* d3d) {
 
 void SetTransformOverrideEnabled(bool) {}
 bool IsTransformOverrideEnabled() { return false; }
+void SetMmdLocalGizmoSuppress(bool) {}
 void HookDirect3D9(IDirect3D9*) {
   Diagnostics::instance().error("Built without MinHook; hooks disabled");
 }

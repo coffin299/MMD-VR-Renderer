@@ -273,6 +273,11 @@ void PluginHost::refreshBackbufferSize() {
   onMainRt_ = true;
 }
 
+void PluginHost::setCaptureArmed(bool armed) {
+  wantCapture_ = armed;
+  SetMmdLocalGizmoSuppress(armed);
+}
+
 void PluginHost::onDeviceCreated(IDirect3DDevice9* device) {
   device_ = device;
   capture_.setDevice(device);
@@ -439,7 +444,7 @@ void PluginHost::restoreObservedTransforms(IDirect3DDevice9* device) {
 void PluginHost::interruptCaptureWait(const char* reason) {
   {
     std::lock_guard<std::mutex> lock(redrawMu_);
-    wantCapture_ = false;
+    setCaptureArmed(false);
     skipCaptures_ = 0;
     preOverlayCandidateLogged_ = false;
     pendingCapture_ = {};
@@ -726,15 +731,15 @@ void PluginHost::onBeforePresent(IDirect3DDevice9* device) {
   // after repeated evicts even with free VRAM.
   capture_.clearStagedSurface();
   wantEvict_.store(false);
-  // The fallback contains MMD's center marker. The pre-overlay color path can
-  // still contain MMD's lower-right model-operation gizmo (local X/Y/Z).
+  // Fallback Present path still has the camera ◎. Local XYZ is skipped via
+  // MinHook while armed; pixel cleanup remains for signature-mismatch builds.
   if (ok && !usedPreOverlay) removeMmdCameraTargetMarker(img);
   if (ok) removeMmdLocalTransformGizmo(img);
   {
     std::lock_guard<std::mutex> lock(redrawMu_);
     if (ok) pendingCapture_ = std::move(img);
     captureReady_ = ok;
-    wantCapture_ = false;
+    setCaptureArmed(false);
     redrawCv_.notify_all();
   }
   // Native camera capture leaves MMD/MME/ray-mmd state untouched. Restoring
@@ -853,7 +858,7 @@ bool PluginHost::captureView(ImageBuffer& out) {
   {
     std::lock_guard<std::mutex> lock(redrawMu_);
     captureReady_ = false;
-    wantCapture_ = true;
+    setCaptureArmed(true);
     skipCaptures_ = 0;
     preOverlayCandidateLogged_ = false;
   }
@@ -870,7 +875,7 @@ bool PluginHost::captureView(ImageBuffer& out) {
     ok = redrawCv_.wait_for(lock, std::chrono::milliseconds(100), [&]{ return captureReady_; });
     if (ok) break;
   }
-  wantCapture_ = false;
+  setCaptureArmed(false);
   skipCaptures_ = 0;
   lock.unlock();
   capture_.setSquareCrop(true);
@@ -911,7 +916,7 @@ bool PluginHost::renderView(const CameraState& cam, ImageBuffer& out) {
   {
     std::lock_guard<std::mutex> lock(redrawMu_);
     captureReady_ = false;
-    wantCapture_ = true;
+    setCaptureArmed(true);
     // Discard one Present after camera UI edits so ray-mmd/MME finish evaluating
     // (skip=0 caused soft/wrong faces and broken right-eye PosZ). Staging still
     // runs during the skipped Present — see stagePreOverlaySource.
@@ -922,21 +927,21 @@ bool PluginHost::renderView(const CameraState& cam, ImageBuffer& out) {
 
   if (controller_.isCancelled()) {
     std::lock_guard<std::mutex> lock(redrawMu_);
-    wantCapture_ = false;
+    setCaptureArmed(false);
     skipCaptures_ = 0;
     return false;
   }
 
   if (!timeline_.applyCameraFace(nativeCameraBase_, cam)) {
     std::lock_guard<std::mutex> lock(redrawMu_);
-    wantCapture_ = false;
+    setCaptureArmed(false);
     skipCaptures_ = 0;
     Diagnostics::instance().error("renderView: failed to apply native MMD camera face");
     return false;
   }
   if (controller_.isCancelled()) {
     std::lock_guard<std::mutex> lock(redrawMu_);
-    wantCapture_ = false;
+    setCaptureArmed(false);
     skipCaptures_ = 0;
     return false;
   }
@@ -945,7 +950,7 @@ bool PluginHost::renderView(const CameraState& cam, ImageBuffer& out) {
   nativeCameraApplied_ = true;
   if (controller_.isCancelled()) {
     std::lock_guard<std::mutex> lock(redrawMu_);
-    wantCapture_ = false;
+    setCaptureArmed(false);
     skipCaptures_ = 0;
     return false;
   }
@@ -964,7 +969,7 @@ bool PluginHost::renderView(const CameraState& cam, ImageBuffer& out) {
     if (ok) break;
   }
 
-  wantCapture_ = false;
+  setCaptureArmed(false);
   skipCaptures_ = 0;
   if (controller_.isCancelled()) {
     Diagnostics::instance().info("renderView: cancelled");
@@ -1013,7 +1018,7 @@ void PluginHost::requestSingleCapture() {
     {
       std::lock_guard<std::mutex> lock(redrawMu_);
       captureReady_ = false;
-      wantCapture_ = true;
+      setCaptureArmed(true);
       skipCaptures_ = 0;
       preOverlayCandidateLogged_ = false;
     }
@@ -1032,7 +1037,7 @@ void PluginHost::requestSingleCapture() {
         ok = redrawCv_.wait_for(lock, std::chrono::milliseconds(100), [&]{ return captureReady_; });
         if (ok) break;
       }
-      wantCapture_ = false;
+      setCaptureArmed(false);
       if (ok) img = std::move(pendingCapture_);
     }
     capture_.setSquareCrop(true);
@@ -1077,7 +1082,7 @@ void PluginHost::runCameraProbe() {
     {
       std::lock_guard<std::mutex> lock(redrawMu_);
       captureReady_ = false;
-      wantCapture_ = true;
+      setCaptureArmed(true);
       preOverlayCandidateLogged_ = false;
     }
     bool baseOk = false;
@@ -1091,7 +1096,7 @@ void PluginHost::runCameraProbe() {
         baseOk = redrawCv_.wait_for(lock, std::chrono::milliseconds(100), [&]{ return captureReady_; });
         if (baseOk) break;
       }
-      wantCapture_ = false;
+      setCaptureArmed(false);
       if (baseOk) a = std::move(pendingCapture_);
     }
     if (!baseOk || a.empty()) {
