@@ -126,6 +126,88 @@ void removeMmdCameraTargetMarker(ImageBuffer& image) {
   }
 }
 
+// MMD's lower-right "local X/Y/Z" model-operation gizmo is not controlled by
+// 表示 > 座標軸表示. It is rendered directly into the capture target even after
+// FPS/info and coordinate-axis menus are disabled. Remove only its distinctive
+// red/green/blue/purple pixels in the lower-right overlay area, then fill from
+// neighboring scene pixels. Requiring all three primary colors avoids touching
+// ordinary scene colors in that corner.
+void removeMmdLocalTransformGizmo(ImageBuffer& image) {
+  if (image.empty() || image.width < 128 || image.height < 128) return;
+
+  const int roiW = (std::min)(480, (std::max)(140, image.width / 16));
+  const int roiH = (std::min)(360, (std::max)(110, image.height / 14));
+  const int left = image.width - roiW;
+  const int top = image.height - roiH;
+  std::vector<uint8_t> mask(static_cast<size_t>(roiW) * static_cast<size_t>(roiH), 0);
+  auto roi = [&](int x, int y) {
+    return static_cast<size_t>(y - top) * static_cast<size_t>(roiW) +
+           static_cast<size_t>(x - left);
+  };
+  auto pix = [&](int x, int y) {
+    return (static_cast<size_t>(y) * static_cast<size_t>(image.width) +
+            static_cast<size_t>(x)) * 4u;
+  };
+
+  int redCount = 0, greenCount = 0, blueCount = 0;
+  for (int y = top; y < image.height; ++y) {
+    for (int x = left; x < image.width; ++x) {
+      const size_t i = pix(x, y);
+      const int r = image.rgba[i + 0], g = image.rgba[i + 1], b = image.rgba[i + 2];
+      const bool red = r >= 115 && r > g * 13 / 10 && r > b * 13 / 10;
+      const bool green = g >= 105 && g > r * 12 / 10 && g > b * 12 / 10;
+      const bool blue = b >= 105 && b > r * 12 / 10 && b > g * 12 / 10;
+      const bool purple = r >= 75 && b >= 75 && r > g * 13 / 10 && b > g * 13 / 10;
+      if (red) ++redCount;
+      if (green) ++greenCount;
+      if (blue) ++blueCount;
+      if (red || green || blue || purple) mask[roi(x, y)] = 1;
+    }
+  }
+  if (redCount < 6 || greenCount < 6 || blueCount < 6) return;
+
+  const std::vector<uint8_t> detected = mask;
+  for (int y = top; y < image.height; ++y) {
+    for (int x = left; x < image.width; ++x) {
+      if (!detected[roi(x, y)]) continue;
+      for (int dy = -2; dy <= 2; ++dy) {
+        for (int dx = -2; dx <= 2; ++dx) {
+          const int nx = x + dx, ny = y + dy;
+          if (nx >= left && nx < image.width && ny >= top && ny < image.height)
+            mask[roi(nx, ny)] = 1;
+        }
+      }
+    }
+  }
+
+  constexpr int kDirs[][2] = {
+      {-1, 0}, {1, 0}, {0, -1}, {0, 1},
+      {-1, -1}, {1, -1}, {-1, 1}, {1, 1},
+  };
+  for (int y = top; y < image.height; ++y) {
+    for (int x = left; x < image.width; ++x) {
+      if (!mask[roi(x, y)]) continue;
+      int sum[4] = {0, 0, 0, 0};
+      int samples = 0;
+      for (const auto& dir : kDirs) {
+        for (int step = 1; step <= 16; ++step) {
+          const int sx = x + dir[0] * step, sy = y + dir[1] * step;
+          if (sx < 0 || sx >= image.width || sy < 0 || sy >= image.height) break;
+          if (sx >= left && sy >= top && mask[roi(sx, sy)]) continue;
+          const size_t qi = pix(sx, sy);
+          for (int c = 0; c < 4; ++c) sum[c] += image.rgba[qi + c];
+          ++samples;
+          break;
+        }
+      }
+      if (samples == 0) continue;
+      const size_t i = pix(x, y);
+      for (int c = 0; c < 4; ++c)
+        image.rgba[i + c] = static_cast<uint8_t>(sum[c] / samples);
+    }
+  }
+}
+
 } // namespace
 
 PluginHost& PluginHost::instance() {
@@ -609,9 +691,10 @@ void PluginHost::onBeforePresent(IDirect3DDevice9* device) {
   // after repeated evicts even with free VRAM.
   capture_.clearStagedSurface();
   wantEvict_.store(false);
-  // The fallback contains MMD's editor overlay. The native pre-overlay path
-  // intentionally leaves scene pixels completely untouched.
+  // The fallback contains MMD's center marker. The pre-overlay color path can
+  // still contain MMD's lower-right model-operation gizmo (local X/Y/Z).
   if (ok && !usedPreOverlay) removeMmdCameraTargetMarker(img);
+  if (ok) removeMmdLocalTransformGizmo(img);
   {
     std::lock_guard<std::mutex> lock(redrawMu_);
     if (ok) pendingCapture_ = std::move(img);
