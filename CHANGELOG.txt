@@ -10,6 +10,10 @@ GitHub Release Full Changelog → this file on the release tag.
 --------------------------------------------------------------------------------
 
 ### 修正 / Fixed
+- JA: **MP4 が 8192×2046 まで落ちる**: 幅 16384 まで入る libx265 を優先（30720×7680 は 16384×4096）。NVENC の 8192 辺制限では潰さない
+  EN: **MP4 no longer crushed to 8192×2046**: prefer libx265 up to width 16384 (30720×7680 → 16384×4096) instead of NVENC's 8192 edge cap
+- JA: **横顔にも正面のキャラが出る**: カメラ確定の直後のフレームは ray がまだ前の向きなので捨て、次の1枚を使う
+  EN: **Side faces still showed the front view**: drop the Present right after the camera commit; ray-mmd applies the new direction on the next frame
 - JA: **1フレームが約30秒・キャラが方位ごとに重複**: カメラ7項目の確定ごとに ray を描き直していたのを、面あたり1回の確定にまとめた
   EN: **~30s per frame and the character repeated on every cubemap direction**: commit the camera once per face instead of redrawing ray for each of the seven fields
 - JA: **録画中の ray-mmd が細い帯になる**: ウィンドウ解像度のビューポートを面サイズへ広げ、GetViewport の偽装をやめた。面ごとに捨てていたフレームと余分な再描画も削減

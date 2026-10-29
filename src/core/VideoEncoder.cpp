@@ -232,23 +232,24 @@ static void fitHevcEncodeSize(int srcW, int srcH, int& outW, int& outH) {
   fitLumaEncodeSize(srcW, srcH, kHevcMaxLumaSamples, outW, outH);
 }
 
-// Conservative HW max edge.
+// HW encoders reject an edge above 8192. libx265 Level 7.2 and libsvtav1 reject
+// width above 16384 (stereo 8K SBS is 30720). Soft keeps the larger frame.
 static int implMaxEdge(EncImpl i) {
   switch (i) {
   case EncImpl::HevcNvenc:
-    return 8192; // common NVENC HEVC cap; huge equirect falls to libx265
   case EncImpl::HevcQsv:
   case EncImpl::HevcAmf:
-    return 8192;
   case EncImpl::Av1Nvenc:
   case EncImpl::Av1Qsv:
   case EncImpl::Av1Amf:
-    return 8192; // Ada/AV1 HW practical edge; soft uses luma budget only
   case EncImpl::H264Nvenc:
     return 8192;
   case EncImpl::H264Qsv:
   case EncImpl::H264Amf:
     return 4096;
+  case EncImpl::Libx265:
+  case EncImpl::LibSvtAv1:
+    return 16384;
   default:
     return 0x7fffffff;
   }
@@ -833,8 +834,6 @@ bool VideoEncoder::encodeSequence(
   }
 
   const EncImpl preferred = preferredImpl(codec, caps);
-  // Always allow per-impl scale-into-cap. Huge stereo 8K (30720×7680) must still
-  // pick hevc_nvenc (→~8192) before glacial libx265 — never drop to H.264 first.
   auto candidates = buildCandidates(codec, caps, /*frameW*/ 0, /*frameH*/ 0, /*ignoreSize*/ true);
   if (caps.hasLibx265 || caps.hasLibSvtAv1 || caps.hasHevcNvenc || caps.hasHevcQsv ||
       caps.hasHevcAmf || caps.hasAv1Nvenc || caps.hasAv1Qsv || caps.hasAv1Amf) {
@@ -847,6 +846,16 @@ bool VideoEncoder::encodeSequence(
       modernOnly.push_back(i);
     }
     if (!modernOnly.empty()) candidates.swap(modernOnly);
+  }
+  // Stereo 8K SBS (30720×7680) fits in libx265 at 16384×4096 but NVENC must
+  // crush it to 8192×2046. Keep the encoder that preserves more pixels.
+  if (frameW > 0 && frameH > 0 && candidates.size() > 1) {
+    std::stable_sort(candidates.begin(), candidates.end(), [&](EncImpl a, EncImpl b) {
+      int aw = 0, ah = 0, bw = 0, bh = 0;
+      fitImplEncodeSize(a, frameW, frameH, aw, ah);
+      fitImplEncodeSize(b, frameW, frameH, bw, bh);
+      return static_cast<long long>(aw) * ah > static_cast<long long>(bw) * bh;
+    });
   }
 
   auto setFallback = [&](EncImpl from, EncImpl to) {

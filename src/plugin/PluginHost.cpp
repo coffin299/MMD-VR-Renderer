@@ -1425,9 +1425,9 @@ bool PluginHost::renderView(const CameraState& cam, ImageBuffer& out) {
     std::lock_guard<std::mutex> lock(redrawMu_);
     captureReady_ = false;
     setCaptureArmed(true);
-    // Camera edits are committed per field before the paint. Capturing that
-    // Present avoids a second full ray-mmd frame per face.
-    skipCaptures_ = 0;
+    // ray-mmd latches the camera on the frame after the edit commit. The first
+    // Present is still the previous direction (character repeated on side faces).
+    skipCaptures_ = 1;
     pendingCam_ = cam;
     preOverlayCandidateLogged_ = false;
   }
