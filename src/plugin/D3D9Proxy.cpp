@@ -43,7 +43,7 @@ bool InitD3D9Proxy() {
   const std::wstring dir = moduleDir();
   Diagnostics::instance().setLogPath(dir + L"\\mmd_vr_renderer.log");
   // Loud banner so "is the new DLL loaded?" is one glance in the log.
-  Diagnostics::instance().infoW(L"=== MMD-VR-Renderer DLL LOADED === build=2026-10-29m faceCap=8192 dir=" + dir);
+  Diagnostics::instance().infoW(L"=== MMD-VR-Renderer DLL LOADED === build=2026-10-29n faceCap=8192 dir=" + dir);
   Diagnostics::instance().info("InitD3D9Proxy");
   g_real = loadRealD3D9();
   if (!g_real) {

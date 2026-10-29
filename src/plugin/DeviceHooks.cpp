@@ -29,6 +29,7 @@ using DrawPrimitiveUP_t = HRESULT (WINAPI*)(IDirect3DDevice9*, D3DPRIMITIVETYPE,
 using DrawIndexedPrimitiveUP_t = HRESULT (WINAPI*)(IDirect3DDevice9*, D3DPRIMITIVETYPE,
                                                     UINT, UINT, UINT, const void*, D3DFORMAT,
                                                     const void*, UINT);
+using MmdPrepareSpriteOverlay_t = void (*)(std::uint8_t*);
 
 static CreateDevice_t g_CreateDevice = nullptr;
 static Present_t g_Present = nullptr;
@@ -43,22 +44,24 @@ static DrawPrimitive_t g_DrawPrimitive = nullptr;
 static DrawIndexedPrimitive_t g_DrawIndexedPrimitive = nullptr;
 static DrawPrimitiveUP_t g_DrawPrimitiveUP = nullptr;
 static DrawIndexedPrimitiveUP_t g_DrawIndexedPrimitiveUP = nullptr;
+static MmdPrepareSpriteOverlay_t g_MmdPrepareSpriteOverlay = nullptr;
 static bool g_hooksInstalled = false;
+static bool g_mmdSpriteOverlayHookInstalled = false;
 static int g_presentDepth = 0;
 
 // VR face capture: rewrite main-camera VIEW/PROJ for the whole Present cycle.
 static std::atomic<bool> g_transformOverride{false};
 static std::atomic<bool> g_suppressMmdLocalGizmo{false};
 
-// MikuDanceStudio / MMD 9.32 x64: Local XYZ is a sprite-atlas strip produced only
-// when app->playbackActive (== +0x368) is 0. Forcing that byte during capture
-// skips the strip and the bone/camera operation rows without touching scene draws.
-// App singleton pointer lives at image RVA 0x1445F8 (g_Block equivalent).
-constexpr uintptr_t kMmdAppPtrRva = 0x1445F8;
+// MikuDanceStudio identifies this exact MMD 9.32 x64 function as
+// PrepareFrameSpriteOverlay. Local XYZ is appended only when
+// app->playbackActive (== +0x368) is 0. Gate it at this function, rather than
+// writing the state ahead of a UI paint that may reset it.
+constexpr uintptr_t kMmdPrepareSpriteOverlayRva = 0x274F0;
 constexpr uintptr_t kMmdPlaybackActiveOff = 0x368;
-static bool g_savedPlaybackValid = false;
-static std::uint8_t g_savedPlayback = 0;
-static bool g_playbackGateLogged = false;
+constexpr unsigned char kMmdPrepareSpriteOverlaySig[] = {
+    0x40, 0x55, 0x57, 0x41, 0x54, 0x41, 0x56, 0x41,
+    0x57, 0x48, 0x8D, 0xAC, 0x24, 0x30, 0xE9, 0xFF};
 
 void SetTransformOverrideEnabled(bool on) {
   g_transformOverride.store(on, std::memory_order_release);
@@ -68,42 +71,44 @@ bool IsTransformOverrideEnabled() {
   return g_transformOverride.load(std::memory_order_acquire);
 }
 
-static std::uint8_t* mmdPlaybackActiveFlag() {
-  HMODULE mmd = GetModuleHandleW(nullptr);
-  if (!mmd) return nullptr;
-  auto** appSlot = reinterpret_cast<std::uint8_t**>(
-      reinterpret_cast<uintptr_t>(mmd) + kMmdAppPtrRva);
-  // The slot is in MMD .data; until CreateDevice finishes it may still be null.
-  if (!appSlot || !*appSlot) return nullptr;
-  return *appSlot + kMmdPlaybackActiveOff;
-}
-
 void SetMmdLocalGizmoSuppress(bool on) {
   g_suppressMmdLocalGizmo.store(on, std::memory_order_release);
-  std::uint8_t* flag = mmdPlaybackActiveFlag();
-  if (!flag) {
-    if (on && !g_playbackGateLogged) {
-      g_playbackGateLogged = true;
-      Diagnostics::instance().warn(
-          "MMD Local XYZ playback gate unavailable (app ptr null; pixel cleanup only)");
-    }
+}
+
+static void Hook_MmdPrepareSpriteOverlay(std::uint8_t* app) {
+  if (!app || !g_suppressMmdLocalGizmo.load(std::memory_order_acquire)) {
+    g_MmdPrepareSpriteOverlay(app);
     return;
   }
-  if (on) {
-    if (!g_savedPlaybackValid) {
-      g_savedPlayback = *flag;
-      g_savedPlaybackValid = true;
-      if (!g_playbackGateLogged) {
-        g_playbackGateLogged = true;
-        Diagnostics::instance().info(
-            "MMD Local XYZ suppress via playbackActive(+0x368) while capture armed");
-      }
-    }
-    *flag = 1;
-  } else if (g_savedPlaybackValid) {
-    *flag = g_savedPlayback;
-    g_savedPlaybackValid = false;
+  const std::uint8_t savedPlayback = app[kMmdPlaybackActiveOff];
+  app[kMmdPlaybackActiveOff] = 1;
+  g_MmdPrepareSpriteOverlay(app);
+  app[kMmdPlaybackActiveOff] = savedPlayback;
+}
+
+static void tryInstallMmdSpriteOverlayHook() {
+  if (g_mmdSpriteOverlayHookInstalled) return;
+  HMODULE mmd = GetModuleHandleW(nullptr);
+  if (!mmd) return;
+  auto* target = reinterpret_cast<unsigned char*>(
+      reinterpret_cast<uintptr_t>(mmd) + kMmdPrepareSpriteOverlayRva);
+  if (std::memcmp(target, kMmdPrepareSpriteOverlaySig,
+                  sizeof(kMmdPrepareSpriteOverlaySig)) != 0) {
+    Diagnostics::instance().warn(
+        "MMD Local XYZ sprite hook skipped (signature mismatch; pixel cleanup only)");
+    g_mmdSpriteOverlayHookInstalled = true;
+    return;
   }
+  if (MH_CreateHook(target, &Hook_MmdPrepareSpriteOverlay,
+                    reinterpret_cast<LPVOID*>(&g_MmdPrepareSpriteOverlay)) != MH_OK ||
+      MH_EnableHook(target) != MH_OK) {
+    Diagnostics::instance().warn("MMD Local XYZ sprite MinHook install failed");
+    g_mmdSpriteOverlayHookInstalled = true;
+    return;
+  }
+  g_mmdSpriteOverlayHookInstalled = true;
+  Diagnostics::instance().info(
+      "Hooked MMD Local XYZ sprite producer (playback gate during capture)");
 }
 
 static void* vtable_slot(void* obj, size_t index) {
@@ -264,6 +269,7 @@ void HookDirect3D9(IDirect3D9* d3d) {
   if (once || !d3d) return;
   once = true;
   MH_Initialize();
+  tryInstallMmdSpriteOverlayHook();
   void* pCreate = vtable_slot(d3d, 16);
   MH_CreateHook(pCreate, &Hook_CreateDevice, (LPVOID*)&g_CreateDevice);
   MH_EnableHook(pCreate);

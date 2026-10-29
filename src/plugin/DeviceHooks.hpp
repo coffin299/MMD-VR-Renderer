@@ -11,9 +11,9 @@ void HookDevice(IDirect3DDevice9* device);
 void SetTransformOverrideEnabled(bool on);
 bool IsTransformOverrideEnabled();
 
-// While capture is armed, force MMD 9.32's playbackActive gate so the Local
-// XYZ sprite strip is not produced (same path as real playback). Pixel cleanup
-// remains as a fallback if the app singleton is not ready yet.
+// While capture is armed, use MMD 9.32's playbackActive gate at the sprite
+// producer so the Local XYZ strip is not generated (same path as playback).
+// Pixel cleanup remains as a fallback on a signature mismatch.
 void SetMmdLocalGizmoSuppress(bool on);
 
 } // namespace mmdvr
