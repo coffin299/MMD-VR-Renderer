@@ -237,6 +237,9 @@ static HRESULT WINAPI Hook_BeginScene(IDirect3DDevice9* self) {
 }
 
 static HRESULT WINAPI Hook_SetTransform(IDirect3DDevice9* self, D3DTRANSFORMSTATETYPE state, const D3DMATRIX* matrix) {
+  D3DMATRIX sealed{};
+  if (PluginHost::instance().consumeSealedSceneTransform(state, matrix, sealed))
+    return g_SetTransform(self, state, &sealed);
   if (!g_transformOverride.load(std::memory_order_acquire)) {
     PluginHost::instance().onObservedTransform(state, matrix);
     return g_SetTransform(self, state, matrix);

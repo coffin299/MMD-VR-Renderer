@@ -999,9 +999,46 @@ void PluginHost::onBeforeSetRenderTarget(IDirect3DDevice9* device, DWORD index) 
   }
 }
 
+namespace {
+
+void orbitOffsetFromUi(const MmdCameraUiState& state, double& ox, double& oy, double& oz) {
+  constexpr double kPi = 3.14159265358979323846;
+  const double pitch = state.rotX * kPi / 180.0;
+  const double yaw = state.rotY * kPi / 180.0;
+  const double roll = state.rotZ * kPi / 180.0;
+  double x = 0.0;
+  double y = 0.0;
+  double z = -state.distance;
+  const double cx = std::cos(pitch);
+  const double sx = std::sin(pitch);
+  const double y1 = y * cx + z * sx;
+  const double z1 = -y * sx + z * cx;
+  y = y1;
+  z = z1;
+  const double cy = std::cos(yaw);
+  const double sy = std::sin(yaw);
+  const double x2 = x * cy + z * sy;
+  const double z2 = -x * sy + z * cy;
+  x = x2;
+  z = z2;
+  const double cz = std::cos(roll);
+  const double sz = std::sin(roll);
+  ox = x * cz + y * sz;
+  oy = -x * sz + y * cz;
+  oz = z;
+}
+
+}  // namespace
+
 void PluginHost::prepareNativeCaptureBeforeBegin(IDirect3DDevice9* device) {
+  sealReady_ = false;
+  sealSceneCamera_ = false;
   if (!device || !wantCapture_ || !nativeCaptureSurfaceActive()) return;
   if (captureDeferPresents_.load(std::memory_order_acquire)) return;
+  // A standing override replaces ray-mmd's own view/projection and drops
+  // materials down to the edge pass (black frame, white wires).
+  controller_.camera().endOverride();
+  SetTransformOverrideEnabled(false);
   if (!latchedCubemapCamera_.valid) {
     bindNativeCaptureTarget(device, true);
     return;
@@ -1012,26 +1049,8 @@ void PluginHost::prepareNativeCaptureBeforeBegin(IDirect3DDevice9* device) {
   bindNativeCaptureTarget(device, true);
 
   const MmdCameraUiState& s = latchedCubemapCamera_;
-  constexpr double kPi = 3.14159265358979323846;
-  const double pitch = s.rotX * kPi / 180.0;
-  const double yaw = s.rotY * kPi / 180.0;
-  const double roll = s.rotZ * kPi / 180.0;
-  double ox = 0.0, oy = 0.0, oz = -s.distance;
-  const double cx = std::cos(pitch), sx = std::sin(pitch);
-  oy = oy * cx + oz * sx;
-  oz = -0.0 * sx + oz * cx;
-  const double cy = std::cos(yaw), sy = std::sin(yaw);
-  {
-    const double nx = ox * cy + oz * sy;
-    oz = -ox * sy + oz * cy;
-    ox = nx;
-  }
-  const double cz = std::cos(roll), sz = std::sin(roll);
-  {
-    const double nx = ox * cz + oy * sz;
-    oy = -ox * sz + oy * cz;
-    ox = nx;
-  }
+  double ox = 0.0, oy = 0.0, oz = 0.0;
+  orbitOffsetFromUi(s, ox, oy, oz);
 
   const Vec3 eye{static_cast<float>(s.x + ox), static_cast<float>(s.y + oy),
                  static_cast<float>(s.z + oz)};
@@ -1067,17 +1086,56 @@ void PluginHost::prepareNativeCaptureBeforeBegin(IDirect3DDevice9* device) {
   faceCam.view = lookAtRH(eye, target, up);
   faceCam.projection = perspectiveRH(90.f, 1.f, zNear, zFar);
   faceCam.valid = true;
-  controller_.camera().beginOverride(faceCam);
-  SetTransformOverrideEnabled(true);
 
   D3DMATRIX view{}, proj{};
   std::memcpy(view.m, faceCam.view.m, sizeof(float) * 16);
   std::memcpy(proj.m, faceCam.projection.m, sizeof(float) * 16);
+  // One write so MME's BeginScene cache matches this face. Override stays off.
   device->SetTransform(D3DTS_VIEW, &view);
   device->SetTransform(D3DTS_PROJECTION, &proj);
+  sealedView_ = view;
+  sealedProj_ = proj;
+  sealViewDone_ = false;
+  sealProjDone_ = false;
+  sealReady_ = true;
+  double box = 0.0, boy = 0.0, boz = 0.0;
+  orbitOffsetFromUi(nativeCameraBase_, box, boy, boz);
+  sealBaseEye_ = Vec3{static_cast<float>(nativeCameraBase_.x + box),
+                      static_cast<float>(nativeCameraBase_.y + boy),
+                      static_cast<float>(nativeCameraBase_.z + boz)};
+}
+
+bool PluginHost::consumeSealedSceneTransform(D3DTRANSFORMSTATETYPE state,
+                                             const D3DMATRIX* incoming, D3DMATRIX& out) {
+  if (!sealSceneCamera_ || !incoming || !onMainRt_ || !latchedCubemapCamera_.valid)
+    return false;
+  const int st = static_cast<int>(state);
+  if (st == CameraController::kD3DTS_VIEW && !sealViewDone_) {
+    Mat4 view{};
+    std::memcpy(view.m, incoming->m, sizeof(view.m));
+    Vec3 eye{}, target{}, up{};
+    if (!decomposeView(view, eye, target, up)) return false;
+    const float dx = eye.x - sealBaseEye_.x;
+    const float dy = eye.y - sealBaseEye_.y;
+    const float dz = eye.z - sealBaseEye_.z;
+    // Only the motion camera MMD puts back. ray-mmd effect cameras stay.
+    if (dx * dx + dy * dy + dz * dz > 9.f) return false;
+    out = sealedView_;
+    sealViewDone_ = true;
+    return true;
+  }
+  if (st == CameraController::kD3DTS_PROJECTION && sealViewDone_ && !sealProjDone_ &&
+      isPerspectiveProjection(incoming)) {
+    out = sealedProj_;
+    sealProjDone_ = true;
+    sealSceneCamera_ = false;
+    return true;
+  }
+  return false;
 }
 
 void PluginHost::onBeginScene(IDirect3DDevice9* device) {
+  if (!wantCapture_) sealSceneCamera_ = false;
   mainPassDrawn_ = false;
   didReplaceThisFrame_ = false;
   onMainRt_ = true;
@@ -1088,6 +1146,15 @@ void PluginHost::onBeginScene(IDirect3DDevice9* device) {
     writeLatchedCubemapCamera(mmdApp_.load(std::memory_order_acquire),
                               latchedCubemapCamera_);
   }
+  // Arm after MME has snapshotted. The next motion-camera SetTransform is the
+  // key being applied again; ray's later matrices are left alone.
+  if (sealReady_ && wantCapture_ &&
+      !captureDeferPresents_.load(std::memory_order_acquire)) {
+    sealSceneCamera_ = true;
+    sealViewDone_ = false;
+    sealProjDone_ = false;
+  }
+  sealReady_ = false;
   // Seed the main scene with the face camera. The hook is active here, so the
   // calls below still take the normal MinHook dispatch route.
   if (device && controller_.camera().overrideActive() && IsTransformOverrideEnabled()) {
@@ -1271,14 +1338,12 @@ void PluginHost::onBeforePresent(IDirect3DDevice9* device) {
   const bool requireNativeFace =
       nativeCaptureState_.load(std::memory_order_acquire) == 3 &&
       mmdOutputFaceSize_ > 0;
-  if (requireNativeFace && nativeCaptureRestore_.ownedCapture) {
-    // Ray's post composite lands on the RT that was current at BeginScene.
-    // That is this capture surface; intermediate 4096 passes are not the frame.
+  if (requireNativeFace && !capture_.hasStagedSurface() &&
+      nativeCaptureRestore_.ownedCapture) {
     D3DSURFACE_DESC nativeDesc{};
     if (SUCCEEDED(nativeCaptureRestore_.ownedCapture->GetDesc(&nativeDesc)) &&
         nativeDesc.Width >= static_cast<UINT>(mmdOutputFaceSize_ * 3 / 4) &&
         nativeDesc.Height >= static_cast<UINT>(mmdOutputFaceSize_ * 3 / 4)) {
-      capture_.clearStagedSurface();
       capture_.stageSurface(nativeCaptureRestore_.ownedCapture,
                             mmdOutputFaceSize_, mmdOutputFaceSize_);
     }

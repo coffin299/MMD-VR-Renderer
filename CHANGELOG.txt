@@ -12,8 +12,8 @@ GitHub Release Full Changelog → this file on the release tag.
 ### 修正 / Fixed
 - JA: **libx265 の幅上限を 16384 に**（30720×7680 は 16384×4096）。av1_nvenc が失敗したときのフォールバック解像度
   EN: **libx265 width cap is 16384** (30720×7680 → 16384×4096), used when av1_nvenc is unavailable or fails
-- JA: **全天球に ray-mmd のライティングが乗らず、横顔も正面のまま**: MME は BeginScene 時点のRTとカメラに合成する。面のRT・90°カメラをその前に束ね、完成したキャプチャ面だけを保存する
-  EN: **Equirect missed ray-mmd lighting and side faces stayed on the front view**: MME composites onto the RT and camera at BeginScene. Bind the face RT and 90° camera first, and save that capture surface
+- JA: **全天球が白線だけの黒画面になる**: ray の行列を毎パス差し替えていたのをやめ、MMD が戻す正面カメラの1回だけ面の向きにする。輪郭用に残った面は保存しない
+  EN: **Equirect turned into white wires on black**: stop replacing ray-mmd's matrices every pass. Only the motion camera MMD puts back is switched to the face. Do not save the leftover edge buffer
 - JA: **1フレームが約30秒・キャラが方位ごとに重複**: カメラ7項目の確定ごとに ray を描き直していたのを、面あたり1回の確定にまとめた
   EN: **~30s per frame and the character repeated on every cubemap direction**: commit the camera once per face instead of redrawing ray for each of the seven fields
 - JA: **録画中の ray-mmd が細い帯になる**: ウィンドウ解像度のビューポートを面サイズへ広げ、GetViewport の偽装をやめた。面ごとに捨てていたフレームと余分な再描画も削減

@@ -46,9 +46,13 @@ public:
   // can be staged before the next pass begins.
   void onBeforeSetRenderTarget(IDirect3DDevice9* device, DWORD index);
   void onBeginScene(IDirect3DDevice9* device);
-  // Bind the face RT, camera, and 90° view before MME's BeginScene snapshot.
-  // Ray composites lighting onto whatever target/camera that snapshot recorded.
+  // Bind the face RT and cubemap camera before MME's BeginScene snapshot.
+  // Does not keep a transform override; ray-mmd sets its own matrices later.
   void prepareNativeCaptureBeforeBegin(IDirect3DDevice9* device);
+  // MMD reapplies the motion camera after BeginScene. Replace that one pair
+  // only. Later ray-mmd matrices must pass through or materials drop out.
+  bool consumeSealedSceneTransform(D3DTRANSFORMSTATETYPE state, const D3DMATRIX* incoming,
+                                   D3DMATRIX& out);
   void onSetRenderTarget(IDirect3DSurface9* rt);
   void onMainPassDraw();
   // Records MMD's live main-camera pair while no cubemap override is active.
@@ -155,6 +159,13 @@ private:
   bool didReplaceThisFrame_ = false;
   D3DMATRIX pendingObservedView_{};
   bool havePendingObservedView_ = false;
+  bool sealReady_ = false;
+  bool sealSceneCamera_ = false;
+  bool sealViewDone_ = false;
+  bool sealProjDone_ = false;
+  D3DMATRIX sealedView_{};
+  D3DMATRIX sealedProj_{};
+  Vec3 sealBaseEye_{};
 
   std::atomic<bool> jobThreadRunning_{false};
 
