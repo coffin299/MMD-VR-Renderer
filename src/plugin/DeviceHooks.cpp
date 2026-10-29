@@ -3,6 +3,7 @@
 #include "mmdvr/Diagnostics.hpp"
 #include <atomic>
 #include <cstring>
+#include <intrin.h>
 
 #if MMDVR_HAS_MINHOOK
 #include <MinHook.h>
@@ -24,7 +25,7 @@ using SetRenderTarget_t = HRESULT (WINAPI*)(IDirect3DDevice9*, DWORD, IDirect3DS
 using BeginScene_t = HRESULT (WINAPI*)(IDirect3DDevice9*);
 using DrawPrimitive_t = HRESULT (WINAPI*)(IDirect3DDevice9*, D3DPRIMITIVETYPE, UINT, UINT);
 using DrawIndexedPrimitive_t = HRESULT (WINAPI*)(IDirect3DDevice9*, D3DPRIMITIVETYPE, INT, UINT, UINT, UINT, UINT);
-using MmdDrawLocalGizmo_t = void (*)();
+using MmdDrawLocalGizmo_t = void (*)(void*, void*);
 
 static CreateDevice_t g_CreateDevice = nullptr;
 static Present_t g_Present = nullptr;
@@ -46,12 +47,15 @@ static int g_presentDepth = 0;
 static std::atomic<bool> g_transformOverride{false};
 static std::atomic<bool> g_suppressMmdLocalGizmo{false};
 
-// MMD 9.32 x64 — drawLocalTransformGizmo (lower-right Local X/Y/Z icons).
-// RVA is stable for this build; MMD is effectively frozen.
-constexpr uintptr_t kMmdLocalGizmoRva = 0x225C0;
+// MMD 9.32 x64 — narrow color-panel draw inside the Local X/Y/Z control.
+// The previous enclosing routine at 0x225C0 also owns UI-frame state, so it
+// must complete. This leaf only paints the Local XYZ panel and has one caller
+// in that path (0x2278E).
+constexpr uintptr_t kMmdLocalGizmoRva = 0x25BF0;
+constexpr uintptr_t kMmdLocalGizmoCallerRva = 0x2278E;
 constexpr unsigned char kMmdLocalGizmoSig[] = {
-    0x40, 0x55, 0x56, 0x48, 0x8D, 0x6C, 0x24, 0xB1,
-    0x48, 0x81, 0xEC, 0xD8, 0x00, 0x00, 0x00, 0x48};
+    0x48, 0x89, 0x5C, 0x24, 0x18, 0x55, 0x56, 0x57,
+    0x41, 0x54, 0x41, 0x55, 0x48, 0x83, 0xEC, 0x80};
 
 void SetTransformOverrideEnabled(bool on) {
   g_transformOverride.store(on, std::memory_order_release);
@@ -65,10 +69,13 @@ void SetMmdLocalGizmoSuppress(bool on) {
   g_suppressMmdLocalGizmo.store(on, std::memory_order_release);
 }
 
-static void Hook_MmdDrawLocalGizmo() {
-  if (g_suppressMmdLocalGizmo.load(std::memory_order_acquire))
+static void Hook_MmdDrawLocalGizmo(void* context, void* canvas) {
+  const auto returnAddress = reinterpret_cast<uintptr_t>(_ReturnAddress());
+  const auto mmdBase = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+  if (g_suppressMmdLocalGizmo.load(std::memory_order_acquire) &&
+      returnAddress == mmdBase + kMmdLocalGizmoCallerRva)
     return;
-  g_MmdDrawLocalGizmo();
+  g_MmdDrawLocalGizmo(context, canvas);
 }
 
 static void tryInstallMmdLocalGizmoHook() {
@@ -93,7 +100,7 @@ static void tryInstallMmdLocalGizmoHook() {
   }
   g_mmdGizmoHookInstalled = true;
   Diagnostics::instance().info(
-      "Hooked MMD Local XYZ gizmo draw (skip while capture armed)");
+      "Hooked MMD Local XYZ panel leaf draw (skip while capture armed)");
 }
 
 static void* vtable_slot(void* obj, size_t index) {

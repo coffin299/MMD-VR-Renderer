@@ -82,7 +82,7 @@ n = 0
 for insn in md.disasm(data[o2 : o2 + 0x200], fn2):
     print(f"0x{insn.address:x}:\t{insn.mnemonic}\t{insn.op_str}")
     n += 1
-    if insn.mnemonic == "ret" or n >= 60:
+    if insn.mnemonic == "ret" or n >= 300:
         break
 
 # Show context around each caller of fn
