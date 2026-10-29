@@ -113,6 +113,9 @@ RenderController::RenderController() = default;
 void RenderController::setCapture(std::shared_ptr<IFrameCapture> capture) { capture_ = std::move(capture); }
 void RenderController::setRedraw(std::shared_ptr<IRedrawRequest> redraw) { redraw_ = std::move(redraw); }
 void RenderController::setAbortHandler(std::function<void()> fn) { abortHandler_ = std::move(fn); }
+void RenderController::setCaptureTeardownHandler(std::function<void()> fn) {
+  captureTeardownHandler_ = std::move(fn);
+}
 void RenderController::setCleanupHandler(std::function<void()> fn) { cleanupHandler_ = std::move(fn); }
 
 void RenderController::notifyStage(const wchar_t* stage, const std::wstring& note) {
@@ -724,6 +727,13 @@ bool RenderController::start(ProgressCallback cb) {
       ok = false;
       Diagnostics::instance().error("Async PNG write failed");
     }
+  }
+
+  // Drop the offscreen captureSurface / MSAA gate before a long encode so
+  // MME/ray-mmd return to the live backbuffer path while FFmpeg runs.
+  if (captureTeardownHandler_) {
+    notifyStage(L"release_capture");
+    captureTeardownHandler_();
   }
 
   {

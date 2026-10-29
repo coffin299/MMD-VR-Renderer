@@ -43,6 +43,8 @@ public:
   void setRedraw(std::shared_ptr<IRedrawRequest> redraw);
   // cancel(): wake capture waits only (must be UI-thread safe — no MMD UI writes).
   void setAbortHandler(std::function<void()> fn);
+  // After the last captured frame (before encode): drop native 8K RT / restore MME.
+  void setCaptureTeardownHandler(std::function<void()> fn);
   // start() end: restore camera / release capture pool on the job worker thread.
   void setCleanupHandler(std::function<void()> fn);
   CameraController& camera() { return camera_; }
@@ -89,6 +91,7 @@ private:
   std::shared_ptr<IRedrawRequest> redraw_;
   ProgressCallback progressCb_;
   std::function<void()> abortHandler_;
+  std::function<void()> captureTeardownHandler_;
   std::function<void()> cleanupHandler_;
   JobProgress progress_{};
   void waitIfPaused();

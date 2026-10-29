@@ -9,6 +9,10 @@ GitHub Release Full Changelog → this file on the release tag.
 ## 2026-10-29
 --------------------------------------------------------------------------------
 
+### 修正 / Fixed
+- JA: **録画終了／キャンセル後に ray-mmd が少し破綻する**: キャプチャ解除時にウィンドウ解像度で PostDeviceResetし、エンコード前に gate/RT を戻す
+  EN: **ray-mmd looks slightly broken after record end/cancel**: PostDeviceReset at window size on capture teardown; restore gate/RT before encode
+
 ### 追加 / Added
 - JA: **AV1 エンコード**（av1_nvenc / QSV / AMF / libsvtav1）。不可時は HEVC → H.264 へ自動フォールバック
   EN: **AV1 encode** (av1_nvenc / QSV / AMF / libsvtav1); falls back to HEVC then H.264 when unavailable
