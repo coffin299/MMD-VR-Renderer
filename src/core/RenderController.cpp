@@ -82,6 +82,30 @@ int resolvePngQueueMax(const RenderSettings& s) {
   return byRam;
 }
 
+// Stereo views should differ only around depth edges. A large flat/missing
+// cubemap region in one eye creates a very high fraction of radically different
+// pixels and requires a right-eye recapture before the frame is written.
+bool stereoEyeHasGrossCorruption(const ImageBuffer& left, const ImageBuffer& right) {
+  if (left.empty() || right.empty() || left.width != right.width || left.height != right.height)
+    return true;
+  const int samplesX = (std::min)(96, left.width);
+  const int samplesY = (std::min)(48, left.height);
+  int extreme = 0;
+  const int total = samplesX * samplesY;
+  for (int sy = 0; sy < samplesY; ++sy) {
+    const int y = sy * left.height / samplesY;
+    for (int sx = 0; sx < samplesX; ++sx) {
+      const int x = sx * left.width / samplesX;
+      const size_t i = (static_cast<size_t>(y) * static_cast<size_t>(left.width) + x) * 4u;
+      const int diff = std::abs((int)left.rgba[i + 0] - (int)right.rgba[i + 0]) +
+                       std::abs((int)left.rgba[i + 1] - (int)right.rgba[i + 1]) +
+                       std::abs((int)left.rgba[i + 2] - (int)right.rgba[i + 2]);
+      if (diff >= 210) ++extreme;
+    }
+  }
+  return total > 0 && extreme * 100 >= total * 12;
+}
+
 } // namespace
 
 RenderController::RenderController() = default;
@@ -496,18 +520,43 @@ bool RenderController::processAnimationFrame(int frameIndex) {
       return false;
     }
 
-    restoreSceneCamera();
-    camera_.endOverride();
-    camera_.restore(saved);
-
     ImageBuffer left = leftFut.get();
     ImageBuffer right = composeFromFaces(facesR, nullptr, mono);
     facesR = {};
 
     if (left.empty() || right.empty()) {
+      restoreSceneCamera();
+      camera_.endOverride();
+      camera_.restore(saved);
       Diagnostics::instance().error("stereo equirect compose failed");
       return false;
     }
+    if (stereoEyeHasGrossCorruption(left, right)) {
+      Diagnostics::instance().warn(
+          "Right-eye cubemap is grossly inconsistent with left; recapturing right eye");
+      std::array<ImageBuffer, 6> retryFacesR{};
+      if (!captureCubemapEye(false, retryFacesR)) {
+        restoreSceneCamera();
+        camera_.endOverride();
+        camera_.restore(saved);
+        Diagnostics::instance().error("right-eye recapture failed");
+        return false;
+      }
+      ImageBuffer retryRight = composeFromFaces(retryFacesR, nullptr, mono);
+      retryFacesR = {};
+      if (retryRight.empty() || stereoEyeHasGrossCorruption(left, retryRight)) {
+        restoreSceneCamera();
+        camera_.endOverride();
+        camera_.restore(saved);
+        Diagnostics::instance().error(
+            "right-eye remains corrupted after recapture; frame rejected (not converted to mono)");
+        return false;
+      }
+      right = std::move(retryRight);
+    }
+    restoreSceneCamera();
+    camera_.endOverride();
+    camera_.restore(saved);
     composed = StereoEngine::composeSideBySide(left, right);
     left = {};
     right = {};

@@ -135,8 +135,11 @@ void removeMmdCameraTargetMarker(ImageBuffer& image) {
 void removeMmdLocalTransformGizmo(ImageBuffer& image) {
   if (image.empty() || image.width < 128 || image.height < 128) return;
 
-  const int roiW = (std::min)(480, (std::max)(140, image.width / 16));
-  const int roiH = (std::min)(360, (std::max)(110, image.height / 14));
+  // This editor control is a fixed-size 3×2 grid in MMD (about 180×140 px),
+  // independent of the requested screen-capture size. Keep its search tight:
+  // a broad lower-right scan can confuse colorful scene geometry for the gizmo.
+  const int roiW = (std::min)(240, image.width);
+  const int roiH = (std::min)(180, image.height);
   const int left = image.width - roiW;
   const int top = image.height - roiH;
   std::vector<uint8_t> mask(static_cast<size_t>(roiW) * static_cast<size_t>(roiH), 0);
@@ -149,7 +152,9 @@ void removeMmdLocalTransformGizmo(ImageBuffer& image) {
             static_cast<size_t>(x)) * 4u;
   };
 
-  int redCount = 0, greenCount = 0, blueCount = 0;
+  int redCells[2] = {0, 0};
+  int greenCells[2] = {0, 0};
+  int blueCells[2] = {0, 0};
   for (int y = top; y < image.height; ++y) {
     for (int x = left; x < image.width; ++x) {
       const size_t i = pix(x, y);
@@ -158,19 +163,31 @@ void removeMmdLocalTransformGizmo(ImageBuffer& image) {
       const bool green = g >= 105 && g > r * 12 / 10 && g > b * 12 / 10;
       const bool blue = b >= 105 && b > r * 12 / 10 && b > g * 12 / 10;
       const bool purple = r >= 75 && b >= 75 && r > g * 13 / 10 && b > g * 13 / 10;
-      if (red) ++redCount;
-      if (green) ++greenCount;
-      if (blue) ++blueCount;
-      if (red || green || blue || purple) mask[roi(x, y)] = 1;
+      const int column = (x - left) * 3 / roiW;
+      const int row = (y - top) * 2 / roiH;
+      const bool expectedRed = red && column == 0;
+      const bool expectedGreen = green && column == 1;
+      const bool expectedBlue = blue && column == 2;
+      if (expectedRed) ++redCells[row];
+      if (expectedGreen) ++greenCells[row];
+      if (expectedBlue) ++blueCells[row];
+      // "local" is purple and sits above the middle column.
+      if (expectedRed || expectedGreen || expectedBlue || (purple && row == 0 && column == 1))
+        mask[roi(x, y)] = 1;
     }
   }
-  if (redCount < 6 || greenCount < 6 || blueCount < 6) return;
+  // The two rows of R/G/B symbols are the signature. Do not touch a scene
+  // unless its pixels match this exact layout.
+  for (int row = 0; row < 2; ++row) {
+    if (redCells[row] < 4 || greenCells[row] < 4 || blueCells[row] < 4)
+      return;
+  }
 
   const std::vector<uint8_t> detected = mask;
   // The glyphs have dark/white outlines several pixels beyond their colored
   // cores. A small dilation left those outlines behind; expand enough to cover
   // each complete Local XYZ icon before scene-pixel reconstruction.
-  constexpr int kGizmoOutlineRadius = 8;
+  constexpr int kGizmoOutlineRadius = 10;
   for (int y = top; y < image.height; ++y) {
     for (int x = left; x < image.width; ++x) {
       if (!detected[roi(x, y)]) continue;
