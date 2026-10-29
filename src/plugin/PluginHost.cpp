@@ -191,6 +191,30 @@ void removeMmdLocalTransformGizmo(ImageBuffer& image) {
     }
   }
 
+  // The colored cores identify the template, but its anti-aliased dark/white
+  // outline and drop shadow extend irregularly beyond them. Once identified,
+  // fill the complete template bounding box rather than leaving fragments.
+  int minX = image.width, minY = image.height, maxX = -1, maxY = -1;
+  for (int y = top; y < image.height; ++y) {
+    for (int x = left; x < image.width; ++x) {
+      if (!mask[roi(x, y)]) continue;
+      minX = (std::min)(minX, x);
+      minY = (std::min)(minY, y);
+      maxX = (std::max)(maxX, x);
+      maxY = (std::max)(maxY, y);
+    }
+  }
+  if (maxX >= minX && maxY >= minY) {
+    constexpr int kTemplateMargin = 4;
+    minX = (std::max)(left, minX - kTemplateMargin);
+    minY = (std::max)(top, minY - kTemplateMargin);
+    maxX = (std::min)(image.width - 1, maxX + kTemplateMargin);
+    maxY = (std::min)(image.height - 1, maxY + kTemplateMargin);
+    for (int y = minY; y <= maxY; ++y)
+      for (int x = minX; x <= maxX; ++x)
+        mask[roi(x, y)] = 1;
+  }
+
   constexpr int kDirs[][2] = {
       {-1, 0}, {1, 0}, {0, -1}, {0, 1},
       {-1, -1}, {1, -1}, {-1, 1}, {1, 1},
