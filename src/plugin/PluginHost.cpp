@@ -956,7 +956,14 @@ bool PluginHost::renderView(const CameraState& cam, ImageBuffer& out) {
   }
   std::unique_lock<std::mutex> lock(redrawMu_);
   bool ok = false;
-  for (int i = 0; i < 200; ++i) {
+  // An 8192² ray-mmd/MME frame can take well beyond the normal 10-second
+  // viewport paint interval before it reaches Present. The first face after
+  // an output-size Reset is particularly expensive. Keep smaller jobs
+  // responsive while allowing the requested full-resolution frame to finish.
+  const int waitBudgetMs = faceMax >= 8192 ? 60000 : faceMax >= 4096 ? 30000 : 10000;
+  constexpr int kWaitSliceMs = 50;
+  const int maxWaits = waitBudgetMs / kWaitSliceMs;
+  for (int i = 0; i < maxWaits; ++i) {
     if (controller_.isCancelled()) break;
     // Nudge occasionally — flooding WM_PAINT re-enters Present under MME.
     if (mmdHwnd_ && (i % 4) == 0) {
@@ -965,7 +972,8 @@ bool PluginHost::renderView(const CameraState& cam, ImageBuffer& out) {
       PostMessageW(mmdHwnd_, WM_PAINT, 0, 0);
       lock.lock();
     }
-    ok = redrawCv_.wait_for(lock, std::chrono::milliseconds(50), [&]{ return captureReady_; });
+    ok = redrawCv_.wait_for(lock, std::chrono::milliseconds(kWaitSliceMs),
+                            [&]{ return captureReady_; });
     if (ok) break;
   }
 
@@ -993,9 +1001,12 @@ bool PluginHost::renderView(const CameraState& cam, ImageBuffer& out) {
     return !out.empty();
   }
 
-  Diagnostics::instance().error(
-      "renderView timed out waiting for Present with native MMD camera "
-      "(MMD may be paused / not redrawing). Face skipped.");
+  char timeout[192];
+  std::snprintf(timeout, sizeof(timeout),
+                "renderView timed out after %d ms waiting for Present (face=%d; "
+                "MMD may be paused / not redrawing). Face skipped.",
+                waitBudgetMs, faceMax);
+  Diagnostics::instance().error(timeout);
   return false;
 }
 

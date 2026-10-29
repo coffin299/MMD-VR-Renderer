@@ -38,6 +38,8 @@ GitHub Release Full Changelog → this file on the release tag.
   EN: 8K storage warnings in the resolution combo, size line, and notes (JA+EN)
 
 ### 修正 / Fixed
+- JA: **8K の最初の面で Present 待機が10秒で失敗する**: 8192² は最大60秒、4K級は最大30秒まで MMD/MME の高解像度描画完了を待機
+  EN: **First 8K face timed out after 10 seconds waiting for Present**: allow up to 60 seconds for 8192² and 30 seconds for 4K-class MMD/MME rendering
 - JA: **右下の Local XYZ 操作ギズモがキャプチャに残る**: MMD 9.32 の描画関数をキャプチャ中だけスキップ（画素マスクは保険）
   EN: **Lower-right Local XYZ gizmo still in captures**: skip MMD 9.32's draw while capture is armed (pixel mask kept as fallback)
 - JA: **8Kなのにぼやける／UI混入／右目欠け**: ray-mmd の HDR カラー面ではなく R32F の効果／深度面を取得して低解像度フォールバックになっていた。完成済みカラーRTを HDR 形式のまま読み出し、残る Local XYZ 操作ギズモを除去。右目が大きく壊れた場合は再キャプチャし、直らなければモノ化せずフレームを拒否
