@@ -40,7 +40,10 @@ static HMODULE loadRealD3D9() {
 }
 
 bool InitD3D9Proxy() {
-  Diagnostics::instance().setLogPath(moduleDir() + L"\\mmd_vr_renderer.log");
+  const std::wstring dir = moduleDir();
+  Diagnostics::instance().setLogPath(dir + L"\\mmd_vr_renderer.log");
+  // Loud banner so "is the new DLL loaded?" is one glance in the log.
+  Diagnostics::instance().infoW(L"=== MMD-VR-Renderer DLL LOADED === build=2026-10-29c faceCap=8192 dir=" + dir);
   Diagnostics::instance().info("InitD3D9Proxy");
   g_real = loadRealD3D9();
   if (!g_real) {
