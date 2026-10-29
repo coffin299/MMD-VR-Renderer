@@ -255,11 +255,17 @@ constexpr uintptr_t kMmdAppResetPending = 0xA11E4;
 constexpr uintptr_t kRendererDevice = 0x3A9C0;
 constexpr uintptr_t kRendererScreenWidth = 0x3A9C8;
 constexpr uintptr_t kRendererScreenHeight = 0x3A9CC;
+constexpr uintptr_t kRendererAspectRatio = 0x3A9D0;
+constexpr uintptr_t kRendererMultisampleGate = 0x3A9E0;
 constexpr uintptr_t kRendererPresentParameters = 0x3A9E8;
 constexpr uintptr_t kRendererCaptureSurface = 0x3AA28;
+constexpr uintptr_t kRendererBackbufferSurface = 0x3AA30;
+constexpr uintptr_t kRendererDepthStencil = 0x3AA38;
 constexpr uintptr_t kRendererCaptureFormat = 0x3AA40;
+constexpr uintptr_t kRendererDepthFormat = 0x3AA18;
 constexpr uintptr_t kMmdApplyOutputRva = 0xA5EA0;
 constexpr uintptr_t kMmdPostDeviceResetRva = 0xA6160;
+constexpr uintptr_t kMmdRefreshViewportRva = 0x216A0;
 constexpr unsigned char kMmdApplyOutputSig[] = {
     0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x74,
     0x24, 0x18, 0x57, 0x48, 0x83, 0xEC, 0x40, 0x80};
@@ -316,11 +322,43 @@ void PluginHost::setCaptureArmed(bool armed) {
   SetMmdLocalGizmoSuppress(armed);
 }
 
+bool PluginHost::nativeCaptureMmeViewportSize(int& outW, int& outH) const {
+  if (!nativeCaptureSurfaceActive()) return false;
+  outW = bbW_;
+  outH = bbH_;
+  return outW > 0 && outH > 0;
+}
+
+void PluginHost::bindNativeCaptureTarget(IDirect3DDevice9* device, bool faceSizedViewport) {
+  if (!device || !nativeCaptureSurfaceActive() || !nativeCaptureRestore_.ownedCapture)
+    return;
+  device->SetRenderTarget(0, nativeCaptureRestore_.ownedCapture);
+  if (nativeCaptureRestore_.ownedDepth)
+    device->SetDepthStencilSurface(nativeCaptureRestore_.ownedDepth);
+  D3DVIEWPORT9 vp{};
+  vp.X = 0;
+  vp.Y = 0;
+  vp.MinZ = 0.0f;
+  vp.MaxZ = 1.0f;
+  if (faceSizedViewport && mmdOutputFaceSize_ > 0) {
+    vp.Width = static_cast<DWORD>(mmdOutputFaceSize_);
+    vp.Height = static_cast<DWORD>(mmdOutputFaceSize_);
+  } else {
+    if (bbW_ <= 0 || bbH_ <= 0)
+      refreshBackbufferSize();
+    vp.Width = static_cast<DWORD>(bbW_ > 0 ? bbW_ : 1);
+    vp.Height = static_cast<DWORD>(bbH_ > 0 ? bbH_ : 1);
+  }
+  device->SetViewport(&vp);
+}
+
 void PluginHost::onMmdAppObserved(void* app) {
   if (!app) return;
   mmdApp_.store(app, std::memory_order_release);
-  // FrameDriver is on the stack here. Never PostDeviceReset/Reset from this
-  // hook — MME loses its resources and MMD continues into a half-reset frame.
+  // Re-bind capture RT and face viewport before Clear. BeginScene will briefly
+  // shrink the viewport to the backbuffer so MME does not allocate 8K effect RTs.
+  if (device_)
+    bindNativeCaptureTarget(device_, true);
 }
 
 void PluginHost::onDeviceCreated(IDirect3DDevice9* device) {
@@ -374,51 +412,60 @@ bool PluginHost::activateNativeCaptureSurface() {
         "Native 8K capture unavailable: MMD app/renderer pointers are invalid");
     return false;
   }
-  auto*& rendererDeviceSlot =
-      mmdField<IDirect3DDevice9*>(renderer, kRendererDevice);
-  IDirect3DDevice9* rendererDevice = rendererDeviceSlot;
-  if (!rendererDevice) {
-    Diagnostics::instance().error(
-        "Native 8K capture unavailable: MMD renderer has no D3D9 device");
-    return false;
-  }
 
-  // MME returns a proxy device to CreateDevice (what we hook). MMD may keep
-  // the underlying device pointer. PostDeviceReset must Reset through the
-  // hooked proxy so MME can drop/recreate its resources; resetting only the
-  // inner device leaves MME holding destroyed objects and crashes next frame.
-  IDirect3DDevice9* resetDevice = device_ ? device_ : rendererDevice;
-  if (device_ && rendererDevice != device_) {
-    char msg[192];
-    std::snprintf(msg, sizeof(msg),
-                  "Native 8K capture: Reset via MME device %p (MMD stored %p)",
-                  static_cast<void*>(device_), static_cast<void*>(rendererDevice));
-    Diagnostics::instance().info(msg);
+  // MME's Reset interceptor crashes on an 8192 swapchain (builds s/t). Resetting
+  // only the inner device (build r) then breaks MME reload. Skip device Reset
+  // entirely: keep the window backbuffer, and hang an 8192 offscreen RT+depth
+  // on the native recorder slots instead.
+  IDirect3DDevice9* createDev = device_ ? device_ : mmdField<IDirect3DDevice9*>(renderer, kRendererDevice);
+  if (!createDev) {
+    Diagnostics::instance().error(
+        "Native 8K capture unavailable: no D3D9 device for CreateRenderTarget");
+    return false;
   }
 
   nativeCaptureRestore_ = {};
   nativeCaptureRestore_.app = app;
   nativeCaptureRestore_.renderer = renderer;
-  nativeCaptureRestore_.device = rendererDevice;
+  nativeCaptureRestore_.device = mmdField<IDirect3DDevice9*>(renderer, kRendererDevice);
   nativeCaptureRestore_.outputWidth = mmdField<std::uint32_t>(app, kMmdAppOutputWidth);
   nativeCaptureRestore_.outputHeight = mmdField<std::uint32_t>(app, kMmdAppOutputHeight);
   nativeCaptureRestore_.screenWidth = mmdField<std::uint32_t>(renderer, kRendererScreenWidth);
   nativeCaptureRestore_.screenHeight = mmdField<std::uint32_t>(renderer, kRendererScreenHeight);
+  nativeCaptureRestore_.aspectRatio = mmdField<float>(renderer, kRendererAspectRatio);
   nativeCaptureRestore_.backbufferWidth =
       mmdField<std::uint32_t>(renderer, kRendererPresentParameters);
   nativeCaptureRestore_.backbufferHeight =
       mmdField<std::uint32_t>(renderer, kRendererPresentParameters + sizeof(std::uint32_t));
   nativeCaptureRestore_.resetPending = mmdField<std::uint8_t>(app, kMmdAppResetPending);
+  // 0 = lockable captureSurface path; 1 = MSAA/backbuffer path. Force 0 for the
+  // duration of our offscreen 8K RT so FrameDriver binds captureSurface.
+  nativeCaptureRestore_.multisampleGate =
+      mmdField<std::uint8_t>(renderer, kRendererMultisampleGate);
   nativeCaptureRestore_.recordingWindow = mmdField<void*>(app, kMmdAppRecordWindow);
+  nativeCaptureRestore_.previousCapture =
+      mmdField<IDirect3DSurface9*>(renderer, kRendererCaptureSurface);
+  nativeCaptureRestore_.previousDepth =
+      mmdField<IDirect3DSurface9*>(renderer, kRendererDepthStencil);
   if (nativeCaptureRestore_.recordingWindow) {
     Diagnostics::instance().error(
         "Native 8K capture refused: MMD already owns an active recording window");
     nativeCaptureRestore_ = {};
     return false;
   }
+
+  static bool recClassRegistered = false;
+  if (!recClassRegistered) {
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = DefWindowProcW;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"RecWindow";
+    RegisterClassW(&wc);
+    recClassRegistered = true;
+  }
   nativeCaptureWindow_ = CreateWindowExW(
-      WS_EX_TOOLWINDOW, L"STATIC", L"MMDVR Native Capture",
-      WS_POPUP, -32000, -32000, face, face, appWindow, nullptr,
+      WS_EX_TOOLWINDOW, L"RecWindow", L"MMDVR Native Capture",
+      WS_POPUP, -32000, -32000, face, face, nullptr, nullptr,
       GetModuleHandleW(nullptr), nullptr);
   if (!nativeCaptureWindow_ || !IsWindow(nativeCaptureWindow_)) {
     nativeCaptureWindow_ = nullptr;
@@ -428,76 +475,79 @@ bool PluginHost::activateNativeCaptureSurface() {
     return false;
   }
 
-  // Native AVI-start GrowRenderTarget path without the DirectShow writer.
-  mmdField<std::uint32_t>(app, kMmdAppOutputWidth) = static_cast<std::uint32_t>(face);
-  mmdField<std::uint32_t>(app, kMmdAppOutputHeight) = static_cast<std::uint32_t>(face);
-  mmdField<std::uint32_t>(renderer, kRendererScreenWidth) = static_cast<std::uint32_t>(face);
-  mmdField<std::uint32_t>(renderer, kRendererScreenHeight) = static_cast<std::uint32_t>(face);
-  mmdField<std::uint32_t>(renderer, kRendererPresentParameters) = static_cast<std::uint32_t>(face);
-  mmdField<std::uint32_t>(renderer, kRendererPresentParameters + sizeof(std::uint32_t)) =
-      static_cast<std::uint32_t>(face);
-  mmdField<std::uint8_t>(app, kMmdAppResetPending) = 1;
-
-  using NativeAppFn = void(__fastcall*)(void*);
-  auto applyOutput = reinterpret_cast<NativeAppFn>(
-      reinterpret_cast<std::uint8_t*>(mmd) + kMmdApplyOutputRva);
-  auto postDeviceReset = reinterpret_cast<NativeAppFn>(
-      reinterpret_cast<std::uint8_t*>(mmd) + kMmdPostDeviceResetRva);
-  applyOutput(app);
-
-  IDirect3DDevice9* previousDevice = rendererDeviceSlot;
-  rendererDeviceSlot = resetDevice;
-  nativeCaptureResetInProgress_.store(true, std::memory_order_release);
-  postDeviceReset(app);
-  nativeCaptureResetInProgress_.store(false, std::memory_order_release);
-  // Keep the device MMD will Present/Reset with as the hooked MME proxy.
-  if (device_)
-    rendererDeviceSlot = device_;
-  else
-    rendererDeviceSlot = previousDevice;
-  rendererDevice = rendererDeviceSlot;
-
-  // A real HWND is required for the recording Present path. DirectShow graph
-  // setup is intentionally not invoked.
-  mmdField<void*>(app, kMmdAppRecordWindow) = nativeCaptureWindow_;
-  auto*& captureSurface =
-      mmdField<IDirect3DSurface9*>(renderer, kRendererCaptureSurface);
-  if (!captureSurface) {
-    const D3DFORMAT format = mmdField<D3DFORMAT>(renderer, kRendererCaptureFormat);
-    const HRESULT hr = rendererDevice->CreateRenderTarget(
-        static_cast<UINT>(face), static_cast<UINT>(face), format,
-        D3DMULTISAMPLE_NONE, 0, TRUE, &captureSurface, nullptr);
-    if (FAILED(hr) || !captureSurface) {
-      char msg[160];
-      std::snprintf(msg, sizeof(msg),
-                    "Native 8K capture CreateRenderTarget(%d) failed hr=0x%08lx",
-                    face, static_cast<unsigned long>(hr));
-      Diagnostics::instance().error(msg);
-      restoreNativeCaptureSurface();
-      return false;
-    }
-  }
-  capture_.setDevice(rendererDevice);
-
-  // Do not SetRenderTarget/RefreshViewport here. Native AVI start leaves the
-  // next FrameDriver bind to captureSurface when recordingWindow != null.
-  // Forcing RT0 mid-Present after Reset races MME effect reload.
-
-  D3DSURFACE_DESC captureDesc{};
-  if (FAILED(captureSurface->GetDesc(&captureDesc)) ||
-      captureDesc.Width < static_cast<UINT>(face * 3 / 4) ||
-      captureDesc.Height < static_cast<UINT>(face * 3 / 4)) {
-    Diagnostics::instance().error(
-        "Native 8K capture target is undersized after Reset; refusing upscale");
-    restoreNativeCaptureSurface();
+  const D3DFORMAT format = mmdField<D3DFORMAT>(renderer, kRendererCaptureFormat);
+  IDirect3DSurface9* captureSurface = nullptr;
+  HRESULT hr = createDev->CreateRenderTarget(
+      static_cast<UINT>(face), static_cast<UINT>(face), format,
+      D3DMULTISAMPLE_NONE, 0, TRUE, &captureSurface, nullptr);
+  if (FAILED(hr) || !captureSurface) {
+    char msg[160];
+    std::snprintf(msg, sizeof(msg),
+                  "Native 8K capture CreateRenderTarget(%d) failed hr=0x%08lx",
+                  face, static_cast<unsigned long>(hr));
+    Diagnostics::instance().error(msg);
+    DestroyWindow(nativeCaptureWindow_);
+    nativeCaptureWindow_ = nullptr;
+    nativeCaptureRestore_ = {};
     return false;
   }
+
+  D3DFORMAT depthFmt = mmdField<D3DFORMAT>(renderer, kRendererDepthFormat);
+  if (depthFmt == D3DFMT_UNKNOWN)
+    depthFmt = D3DFMT_D24S8;
+  if (nativeCaptureRestore_.previousDepth) {
+    D3DSURFACE_DESC depthDesc{};
+    if (SUCCEEDED(nativeCaptureRestore_.previousDepth->GetDesc(&depthDesc)) &&
+        depthDesc.MultiSampleType == D3DMULTISAMPLE_NONE)
+      depthFmt = depthDesc.Format;
+  }
+  IDirect3DSurface9* depthSurface = nullptr;
+  hr = createDev->CreateDepthStencilSurface(
+      static_cast<UINT>(face), static_cast<UINT>(face), depthFmt,
+      D3DMULTISAMPLE_NONE, 0, TRUE, &depthSurface, nullptr);
+  if (FAILED(hr) || !depthSurface) {
+    char msg[160];
+    std::snprintf(msg, sizeof(msg),
+                  "Native 8K capture CreateDepthStencilSurface(%d) failed hr=0x%08lx",
+                  face, static_cast<unsigned long>(hr));
+    Diagnostics::instance().error(msg);
+    captureSurface->Release();
+    DestroyWindow(nativeCaptureWindow_);
+    nativeCaptureWindow_ = nullptr;
+    nativeCaptureRestore_ = {};
+    return false;
+  }
+
+  nativeCaptureRestore_.ownedCapture = captureSurface;
+  nativeCaptureRestore_.ownedDepth = depthSurface;
+
+  // Keep screenWidth/output/presentParameters at the window backbuffer size so
+  // MME's GetViewport-based effect RTs stay small. Only the offscreen capture
+  // RT+depth are face-sized; cubemap projection is supplied by our SetTransform
+  // override, not by RefreshMainWindowViewport.
+  mmdField<IDirect3DSurface9*>(renderer, kRendererCaptureSurface) = captureSurface;
+  mmdField<IDirect3DSurface9*>(renderer, kRendererDepthStencil) = depthSurface;
+  mmdField<std::uint8_t>(renderer, kRendererMultisampleGate) = 0;
+  mmdField<void*>(app, kMmdAppRecordWindow) = nativeCaptureWindow_;
+  if (nativeCaptureRestore_.multisampleGate != 0) {
+    char gateMsg[144];
+    std::snprintf(gateMsg, sizeof(gateMsg),
+                  "Native 8K capture: forcing captureSurface gate 0 (was %u; MSAA backbuffer path)",
+                  static_cast<unsigned>(nativeCaptureRestore_.multisampleGate));
+    Diagnostics::instance().info(gateMsg);
+  }
+
+  capture_.setDevice(createDev);
   refreshBackbufferSize();
   mmdOutputFaceSize_ = face;
   mmdOutputSizeConfigured_ = true;
-  char msg[192];
+  bindNativeCaptureTarget(createDev, true);
+
+  D3DSURFACE_DESC captureDesc{};
+  captureSurface->GetDesc(&captureDesc);
+  char msg[240];
   std::snprintf(msg, sizeof(msg),
-                "Native capture surface active: %ux%u outerBackbuffer=%dx%d (AVI writer not started)",
+                "Native capture surface active (no Reset): capture=%ux%u; GetViewport lies %dx%d to MME",
                 static_cast<unsigned>(captureDesc.Width), static_cast<unsigned>(captureDesc.Height),
                 bbW_, bbH_);
   Diagnostics::instance().info(msg);
@@ -508,48 +558,52 @@ void PluginHost::restoreNativeCaptureSurface() {
   void* app = nativeCaptureRestore_.app;
   void* renderer = nativeCaptureRestore_.renderer;
   HMODULE mmd = GetModuleHandleW(nullptr);
-  if (!app || !renderer || !mmd || !mmdNativeRecorderFunctionsMatch(mmd)) {
-    if (nativeCaptureWindow_ && IsWindow(nativeCaptureWindow_))
-      DestroyWindow(nativeCaptureWindow_);
-    nativeCaptureWindow_ = nullptr;
-    nativeCaptureRestore_ = {};
-    nativeCaptureState_.store(0, std::memory_order_release);
-    mmdOutputSizeConfigured_ = false;
-    mmdOutputFaceSize_ = 0;
-    return;
+
+  if (renderer) {
+    auto*& captureSlot = mmdField<IDirect3DSurface9*>(renderer, kRendererCaptureSurface);
+    auto*& depthSlot = mmdField<IDirect3DSurface9*>(renderer, kRendererDepthStencil);
+    captureSlot = nativeCaptureRestore_.previousCapture;
+    depthSlot = nativeCaptureRestore_.previousDepth;
+    if (nativeCaptureRestore_.ownedCapture) {
+      nativeCaptureRestore_.ownedCapture->Release();
+      nativeCaptureRestore_.ownedCapture = nullptr;
+    }
+    if (nativeCaptureRestore_.ownedDepth) {
+      nativeCaptureRestore_.ownedDepth->Release();
+      nativeCaptureRestore_.ownedDepth = nullptr;
+    }
   }
 
-  mmdField<void*>(app, kMmdAppRecordWindow) = nativeCaptureRestore_.recordingWindow;
-  mmdField<std::uint32_t>(app, kMmdAppOutputWidth) = nativeCaptureRestore_.outputWidth;
-  mmdField<std::uint32_t>(app, kMmdAppOutputHeight) = nativeCaptureRestore_.outputHeight;
-  mmdField<std::uint32_t>(renderer, kRendererScreenWidth) = nativeCaptureRestore_.screenWidth;
-  mmdField<std::uint32_t>(renderer, kRendererScreenHeight) = nativeCaptureRestore_.screenHeight;
-  mmdField<std::uint32_t>(renderer, kRendererPresentParameters) =
-      nativeCaptureRestore_.backbufferWidth;
-  mmdField<std::uint32_t>(renderer, kRendererPresentParameters + sizeof(std::uint32_t)) =
-      nativeCaptureRestore_.backbufferHeight;
-  mmdField<std::uint8_t>(app, kMmdAppResetPending) = nativeCaptureRestore_.resetPending;
+  if (app && renderer) {
+    mmdField<void*>(app, kMmdAppRecordWindow) = nativeCaptureRestore_.recordingWindow;
+    mmdField<std::uint8_t>(renderer, kRendererMultisampleGate) =
+        nativeCaptureRestore_.multisampleGate;
 
-  using NativeAppFn = void(__fastcall*)(void*);
-  auto applyOutput = reinterpret_cast<NativeAppFn>(
-      reinterpret_cast<std::uint8_t*>(mmd) + kMmdApplyOutputRva);
-  auto postDeviceReset = reinterpret_cast<NativeAppFn>(
-      reinterpret_cast<std::uint8_t*>(mmd) + kMmdPostDeviceResetRva);
-  applyOutput(app);
+    IDirect3DDevice9* dev = device_ ? device_ : nativeCaptureRestore_.device;
+    if (dev) {
+      IDirect3DSurface9* bb = nullptr;
+      if (SUCCEEDED(dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb)) && bb) {
+        dev->SetRenderTarget(0, bb);
+        bb->Release();
+      }
+      if (nativeCaptureRestore_.previousDepth)
+        dev->SetDepthStencilSurface(nativeCaptureRestore_.previousDepth);
+      if (bbW_ > 0 && bbH_ > 0) {
+        D3DVIEWPORT9 vp{};
+        vp.Width = static_cast<DWORD>(bbW_);
+        vp.Height = static_cast<DWORD>(bbH_);
+        vp.MaxZ = 1.0f;
+        dev->SetViewport(&vp);
+      }
+    }
 
-  auto*& rendererDeviceSlot =
-      mmdField<IDirect3DDevice9*>(renderer, kRendererDevice);
-  IDirect3DDevice9* resetDevice = device_ ? device_ : (
-      nativeCaptureRestore_.device ? nativeCaptureRestore_.device : rendererDeviceSlot);
-  if (resetDevice)
-    rendererDeviceSlot = resetDevice;
-  nativeCaptureResetInProgress_.store(true, std::memory_order_release);
-  postDeviceReset(app);
-  nativeCaptureResetInProgress_.store(false, std::memory_order_release);
-  if (device_)
-    rendererDeviceSlot = device_;
-  else if (nativeCaptureRestore_.device)
-    rendererDeviceSlot = nativeCaptureRestore_.device;
+    if (mmd && mmdNativeRecorderFunctionsMatch(mmd)) {
+      using NativeAppFn = void(__fastcall*)(void*);
+      auto refreshViewport = reinterpret_cast<NativeAppFn>(
+          reinterpret_cast<std::uint8_t*>(mmd) + kMmdRefreshViewportRva);
+      refreshViewport(app);
+    }
+  }
 
   capture_.setDevice(device_);
   refreshBackbufferSize();
@@ -560,7 +614,7 @@ void PluginHost::restoreNativeCaptureSurface() {
   nativeCaptureState_.store(0, std::memory_order_release);
   mmdOutputSizeConfigured_ = false;
   mmdOutputFaceSize_ = 0;
-  Diagnostics::instance().info("Native capture surface released; MMD output restored");
+  Diagnostics::instance().info("Native capture surface released; MMD output restored (no Reset)");
 }
 
 void PluginHost::processNativeCaptureSurfaceRequests() {
@@ -920,25 +974,47 @@ void PluginHost::onGetTransform(D3DTRANSFORMSTATETYPE state, D3DMATRIX* matrix) 
     memcpy(matrix->m, ov.projection.m, sizeof(float) * 16);
 }
 
-void PluginHost::onBeforePresent(IDirect3DDevice9* device) {
-  if (device) device_ = device;
-  onMainRt_ = true;
+bool PluginHost::adjustPresentRects(const RECT*& source, const RECT*& dest,
+                                         RECT& localSource, RECT& localDest) {
+  if (nativeCaptureState_.load(std::memory_order_acquire) != 3)
+    return false;
+  if (bbW_ <= 0 || bbH_ <= 0)
+    refreshBackbufferSize();
+  if (bbW_ <= 0 || bbH_ <= 0)
+    return false;
+  const bool srcOverflow = source && (source->right > bbW_ || source->bottom > bbH_ ||
+                                      source->left < 0 || source->top < 0);
+  const bool dstOverflow = dest && (dest->right > bbW_ || dest->bottom > bbH_ ||
+                                    dest->left < 0 || dest->top < 0);
+  if (!srcOverflow && !dstOverflow)
+    return false;
+  localSource = {0, 0, bbW_, bbH_};
+  localDest = localSource;
+  if (source) source = &localSource;
+  if (dest) dest = &localDest;
+  return true;
+}
 
-  // Reset/recreate only outside FrameDriver, on the Present path so MME's
-  // hooked device participates and the current frame is not half-reset.
+void PluginHost::onAfterPresent(IDirect3DDevice9* device) {
+  if (device) device_ = device;
+  // Device Reset is illegal while Present is on the stack (build s crash).
+  // MME's Reset interceptor (OnLost → real Reset → OnReset) only runs when
+  // Reset is invoked on the hooked proxy after Present has returned.
   const int nativeStateBefore = nativeCaptureState_.load(std::memory_order_acquire);
   processNativeCaptureSurfaceRequests();
   const int nativeStateAfter = nativeCaptureState_.load(std::memory_order_acquire);
   if (nativeStateBefore != nativeStateAfter &&
       (nativeStateAfter == 3 || nativeStateAfter == -1 || nativeStateAfter == 0)) {
-    // This Present was interrupted by Reset. Do not capture it; the job worker
-    // continues after MME has recreated resources on the next paint.
     if (mmdHwnd_ && IsWindow(mmdHwnd_)) {
       InvalidateRect(mmdHwnd_, nullptr, FALSE);
       PostMessageW(mmdHwnd_, WM_PAINT, 0, 0);
     }
-    return;
   }
+}
+
+void PluginHost::onBeforePresent(IDirect3DDevice9* device) {
+  if (device) device_ = device;
+  onMainRt_ = true;
 
   if (wantReleasePool_.exchange(false))
     capture_.releasePool();

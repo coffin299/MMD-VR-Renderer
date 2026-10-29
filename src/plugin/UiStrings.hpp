@@ -64,6 +64,7 @@ struct Bundle {
   const wchar_t* comboCodecNvenc;
   const wchar_t* comboCodecQsv;
   const wchar_t* comboCodecAmf;
+  const wchar_t* comboCodecAv1;
   const wchar_t* btnStart;
   const wchar_t* btnCaptureOnly;
   const wchar_t* btnCancel;

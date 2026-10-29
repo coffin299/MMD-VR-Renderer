@@ -66,6 +66,7 @@ const Bundle kJa{
   L"NVENC（hevc_nvenc優先）",
   L"QSV（hevc_qsv優先）",
   L"AMF（hevc_amf優先）",
+  L"AV1（av1_nvenc優先 → HEVCフォールバック）",
   L"開始",
   L"キャプチャ",
   L"キャンセル",
@@ -127,7 +128,7 @@ const Bundle kJa{
   L"日本語",
   L"English",
   L"レンダリング実行前に必ずプロジェクトを保存してください",
-  L"エンコーダ: %s\n（HW不可／巨大解像度はHEVC Level7.2内へ縮小）",
+  L"エンコーダ: %s\n（入力がエンコード上限超過時のみ縮小。連番はフル解像度のまま）",
   L"未完了のジョブがあります。\n\n"
   L"次フレーム: %d（完了済 %d / 予定 %d）\n"
   L"フォルダ:\n%s\n\n"
@@ -201,6 +202,7 @@ const Bundle kEn{
   L"NVENC (prefer hevc_nvenc)",
   L"QSV (prefer hevc_qsv)",
   L"AMF (prefer hevc_amf)",
+  L"AV1 (prefer av1_nvenc → HEVC fallback)",
   L"Start",
   L"Capture",
   L"Cancel",
@@ -262,7 +264,7 @@ const Bundle kEn{
   L"日本語",
   L"English",
   L"Always save your project before rendering",
-  L"Encoder: %s\n(HW unavailable / oversized frames scaled to HEVC Level 7.2)",
+  L"Encoder: %s\n(Scaled only if input exceeds encoder limits; sequence stays full-res)",
   L"An unfinished job was found.\n\n"
   L"Next frame: %d (done %d / planned %d)\n"
   L"Folder:\n%s\n\n"

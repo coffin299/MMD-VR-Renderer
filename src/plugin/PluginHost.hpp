@@ -20,6 +20,19 @@ public:
   void onDeviceCreated(IDirect3DDevice9* device);
   void onDeviceReset();
   void onBeforePresent(IDirect3DDevice9* device);
+  // Runs after Present returns — safe point for device Reset (MME).
+  void onAfterPresent(IDirect3DDevice9* device);
+  // When native 8K is active, Present source rects may exceed the real
+  // backbuffer; clamp them so D3D/MME do not enter device-lost Reset.
+  bool adjustPresentRects(const RECT*& source, const RECT*& dest,
+                          RECT& localSource, RECT& localDest);
+  bool nativeCaptureSurfaceActive() const {
+    return nativeCaptureState_.load(std::memory_order_acquire) == 3;
+  }
+  // faceSized=false → backbuffer viewport (what MME SasRefreshViewport must see).
+  // faceSized=true  → face viewport for Clear / model draw into captureSurface.
+  void bindNativeCaptureTarget(IDirect3DDevice9* device, bool faceSizedViewport);
+  bool nativeCaptureMmeViewportSize(int& outW, int& outH) const;
   // Observed in MMD's native sprite producer on the D3D thread. This is the
   // authoritative app instance used by its recorder/reset routines.
   void onMmdAppObserved(void* app);
@@ -104,10 +117,16 @@ private:
     std::uint32_t outputHeight = 0;
     std::uint32_t screenWidth = 0;
     std::uint32_t screenHeight = 0;
+    float aspectRatio = 0.f;
     std::uint32_t backbufferWidth = 0;
     std::uint32_t backbufferHeight = 0;
     std::uint8_t resetPending = 0;
+    std::uint8_t multisampleGate = 0;
     void* recordingWindow = nullptr;
+    IDirect3DSurface9* previousCapture = nullptr;
+    IDirect3DSurface9* previousDepth = nullptr;
+    IDirect3DSurface9* ownedCapture = nullptr;
+    IDirect3DSurface9* ownedDepth = nullptr;
   } nativeCaptureRestore_{};
   bool preOverlayCandidateLogged_ = false;
   ImageBuffer pendingCapture_;

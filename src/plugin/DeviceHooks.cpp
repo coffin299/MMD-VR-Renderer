@@ -2,6 +2,7 @@
 #include "PluginHost.hpp"
 #include "mmdvr/Diagnostics.hpp"
 #include <atomic>
+#include <cstring>
 #include <cstdint>
 
 #if MMDVR_HAS_MINHOOK
@@ -22,6 +23,7 @@ using SetTransform_t = HRESULT (WINAPI*)(IDirect3DDevice9*, D3DTRANSFORMSTATETYP
 using GetTransform_t = HRESULT (WINAPI*)(IDirect3DDevice9*, D3DTRANSFORMSTATETYPE, D3DMATRIX*);
 using SetRenderTarget_t = HRESULT (WINAPI*)(IDirect3DDevice9*, DWORD, IDirect3DSurface9*);
 using BeginScene_t = HRESULT (WINAPI*)(IDirect3DDevice9*);
+using GetViewport_t = HRESULT (WINAPI*)(IDirect3DDevice9*, D3DVIEWPORT9*);
 using DrawPrimitive_t = HRESULT (WINAPI*)(IDirect3DDevice9*, D3DPRIMITIVETYPE, UINT, UINT);
 using DrawIndexedPrimitive_t = HRESULT (WINAPI*)(IDirect3DDevice9*, D3DPRIMITIVETYPE, INT, UINT, UINT, UINT, UINT);
 using DrawPrimitiveUP_t = HRESULT (WINAPI*)(IDirect3DDevice9*, D3DPRIMITIVETYPE, UINT,
@@ -40,13 +42,17 @@ static SetTransform_t g_SetTransform = nullptr;
 static GetTransform_t g_GetTransform = nullptr;
 static SetRenderTarget_t g_SetRenderTarget = nullptr;
 static BeginScene_t g_BeginScene = nullptr;
+static GetViewport_t g_GetViewport = nullptr;
 static DrawPrimitive_t g_DrawPrimitive = nullptr;
 static DrawIndexedPrimitive_t g_DrawIndexedPrimitive = nullptr;
 static DrawPrimitiveUP_t g_DrawPrimitiveUP = nullptr;
 static DrawIndexedPrimitiveUP_t g_DrawIndexedPrimitiveUP = nullptr;
 static MmdPrepareSpriteOverlay_t g_MmdPrepareSpriteOverlay = nullptr;
+using MmdDownsampleCapture_t = unsigned long (*)(void*);
+static MmdDownsampleCapture_t g_MmdDownsampleCapture = nullptr;
 static bool g_hooksInstalled = false;
 static bool g_mmdSpriteOverlayHookInstalled = false;
+static bool g_mmdDownsampleHookInstalled = false;
 static int g_presentDepth = 0;
 
 // VR face capture: rewrite main-camera VIEW/PROJ for the whole Present cycle.
@@ -62,6 +68,11 @@ constexpr uintptr_t kMmdPlaybackActiveOff = 0x368;
 constexpr unsigned char kMmdPrepareSpriteOverlaySig[] = {
     0x40, 0x55, 0x57, 0x41, 0x54, 0x41, 0x56, 0x41,
     0x57, 0x48, 0x8D, 0xAC, 0x24, 0x30, 0xE9, 0xFF};
+// DownsampleCaptureSurface: 8192^2 system-mem readback every recorder frame.
+constexpr uintptr_t kMmdDownsampleCaptureRva = 0x9F6A0;
+constexpr unsigned char kMmdDownsampleCaptureSig[] = {
+    0x4C, 0x8B, 0xDC, 0x48, 0x81, 0xEC, 0xC8, 0x00,
+    0x00, 0x00, 0x48, 0x8B, 0x05};
 
 void SetTransformOverrideEnabled(bool on) {
   g_transformOverride.store(on, std::memory_order_release);
@@ -112,6 +123,40 @@ static void tryInstallMmdSpriteOverlayHook() {
       "Hooked MMD Local XYZ sprite producer (playback gate during capture)");
 }
 
+static unsigned long Hook_MmdDownsampleCapture(void* app) {
+  // Native 8K keeps the swapchain small and reads captureSurface directly.
+  // MMD's recorder downsample would allocate another face-sized SYSTEMMEM
+  // surface every frame (~256MB at 8K) and burn a full CPU box filter.
+  if (PluginHost::instance().nativeCaptureSurfaceActive())
+    return 0;
+  return g_MmdDownsampleCapture(app);
+}
+
+static void tryInstallMmdDownsampleHook() {
+  if (g_mmdDownsampleHookInstalled) return;
+  HMODULE mmd = GetModuleHandleW(nullptr);
+  if (!mmd) return;
+  auto* target = reinterpret_cast<unsigned char*>(
+      reinterpret_cast<uintptr_t>(mmd) + kMmdDownsampleCaptureRva);
+  if (std::memcmp(target, kMmdDownsampleCaptureSig,
+                  sizeof(kMmdDownsampleCaptureSig)) != 0) {
+    Diagnostics::instance().warn(
+        "MMD capture downsample hook skipped (signature mismatch)");
+    g_mmdDownsampleHookInstalled = true;
+    return;
+  }
+  if (MH_CreateHook(target, &Hook_MmdDownsampleCapture,
+                    reinterpret_cast<LPVOID*>(&g_MmdDownsampleCapture)) != MH_OK ||
+      MH_EnableHook(target) != MH_OK) {
+    Diagnostics::instance().warn("MMD capture downsample MinHook install failed");
+    g_mmdDownsampleHookInstalled = true;
+    return;
+  }
+  g_mmdDownsampleHookInstalled = true;
+  Diagnostics::instance().info(
+      "Hooked MMD capture downsample (skipped during native 8K offscreen capture)");
+}
+
 static void* vtable_slot(void* obj, size_t index) {
   return (*(void***)obj)[index];
 }
@@ -120,7 +165,14 @@ static HRESULT WINAPI Hook_Present(IDirect3DDevice9* self, const RECT* a, const 
   ++g_presentDepth;
   if (g_presentDepth == 1)
     PluginHost::instance().onBeforePresent(self);
-  HRESULT hr = g_Present(self, a, b, c, d);
+  RECT localA{}, localB{};
+  const RECT* src = a;
+  const RECT* dst = b;
+  if (g_presentDepth == 1)
+    PluginHost::instance().adjustPresentRects(src, dst, localA, localB);
+  HRESULT hr = g_Present(self, src, dst, c, d);
+  if (g_presentDepth == 1)
+    PluginHost::instance().onAfterPresent(self);
   --g_presentDepth;
   return hr;
 }
@@ -153,10 +205,32 @@ static HRESULT WINAPI Hook_SetRenderTarget(IDirect3DDevice9* self, DWORD index, 
   return hr;
 }
 
+static HRESULT WINAPI Hook_GetViewport(IDirect3DDevice9* self, D3DVIEWPORT9* vp) {
+  HRESULT hr = g_GetViewport(self, vp);
+  // MME/ray size work RTs from GetViewport. During native 8K capture the raster
+  // viewport is face-sized; report the backbuffer size so effect buffers stay
+  // near window resolution while geometry still fills the 8K capture RT.
+  int lieW = 0, lieH = 0;
+  if (SUCCEEDED(hr) && vp &&
+      PluginHost::instance().nativeCaptureMmeViewportSize(lieW, lieH)) {
+    if (vp->Width > static_cast<DWORD>(lieW) ||
+        vp->Height > static_cast<DWORD>(lieH)) {
+      vp->X = 0;
+      vp->Y = 0;
+      vp->Width = static_cast<DWORD>(lieW);
+      vp->Height = static_cast<DWORD>(lieH);
+    }
+  }
+  return hr;
+}
+
 static HRESULT WINAPI Hook_BeginScene(IDirect3DDevice9* self) {
   HRESULT hr = g_BeginScene(self);
-  if (SUCCEEDED(hr))
+  if (SUCCEEDED(hr)) {
+    if (PluginHost::instance().nativeCaptureSurfaceActive())
+      PluginHost::instance().bindNativeCaptureTarget(self, true);
     PluginHost::instance().onBeginScene(self);
+  }
   return hr;
 }
 
@@ -226,6 +300,7 @@ void HookDevice(IDirect3DDevice9* device) {
   void* pStretchRect = vtable_slot(device, 34);
   void* pSetRT = vtable_slot(device, 37);
   void* pBegin = vtable_slot(device, 41);
+  void* pGetViewport = vtable_slot(device, 47);
   void* pSetTransform = vtable_slot(device, 44);
   void* pGetTransform = vtable_slot(device, 45);
   void* pDrawPrim = vtable_slot(device, 81);
@@ -241,6 +316,7 @@ void HookDevice(IDirect3DDevice9* device) {
     MH_CreateHook(pStretchRect, &Hook_StretchRect, (LPVOID*)&g_StretchRect);
     MH_CreateHook(pSetRT, &Hook_SetRenderTarget, (LPVOID*)&g_SetRenderTarget);
     MH_CreateHook(pBegin, &Hook_BeginScene, (LPVOID*)&g_BeginScene);
+    MH_CreateHook(pGetViewport, &Hook_GetViewport, (LPVOID*)&g_GetViewport);
     MH_CreateHook(pSetTransform, &Hook_SetTransform, (LPVOID*)&g_SetTransform);
     MH_CreateHook(pGetTransform, &Hook_GetTransform, (LPVOID*)&g_GetTransform);
     MH_CreateHook(pDrawPrim, &Hook_DrawPrimitive, (LPVOID*)&g_DrawPrimitive);
@@ -250,7 +326,7 @@ void HookDevice(IDirect3DDevice9* device) {
                   (LPVOID*)&g_DrawIndexedPrimitiveUP);
     MH_EnableHook(MH_ALL_HOOKS);
     Diagnostics::instance().info(
-        "Device hooks installed (Present/Reset/GetRenderTargetData/StretchRect/SetRT/BeginScene/Set|GetTransform/Draw*+UP)");
+        "Device hooks installed (Present/Reset/GetRenderTargetData/StretchRect/SetRT/BeginScene/GetViewport/Set|GetTransform/Draw*+UP)");
   }
   PluginHost::instance().onDeviceCreated(device);
 }
@@ -271,6 +347,7 @@ void HookDirect3D9(IDirect3D9* d3d) {
   once = true;
   MH_Initialize();
   tryInstallMmdSpriteOverlayHook();
+  tryInstallMmdDownsampleHook();
   void* pCreate = vtable_slot(d3d, 16);
   MH_CreateHook(pCreate, &Hook_CreateDevice, (LPVOID*)&g_CreateDevice);
   MH_EnableHook(pCreate);

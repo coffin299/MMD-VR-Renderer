@@ -84,6 +84,23 @@ inline void queryGpuMemory(unsigned long long& totalMb, unsigned long long& free
   freeMb = bestFree;
 }
 
+
+static bool mmeDllPresentBesideExe() {
+  wchar_t path[MAX_PATH]{};
+  if (!GetModuleFileNameW(nullptr, path, MAX_PATH)) return false;
+  std::wstring dir(path);
+  const auto slash = dir.find_last_of(L"\\/");
+  if (slash != std::wstring::npos) dir.resize(slash);
+  return GetFileAttributesW((dir + L"\\d3d9_mme.dll").c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
+// Heavy MME/ray scenes already fill a 16GB card; native 8K face RTs on top
+// commonly exhaust VRAM. Prefer 4096 when MME is chained.
+static void applyMmeFaceCap(HwSuggest& out) {
+  if (!mmeDllPresentBesideExe()) return;
+  if (out.faceSize > 4096) out.faceSize = 4096;
+}
+
 inline void applyVramCap(HwSuggest& out) {
   // Face autofill by installed VRAM (16GB-class can push MaxTexture 8192):
   //   ≥16GB → 8192,  ~8–15GB → 4096,  smaller → tighter caps.
@@ -217,6 +234,7 @@ inline HwSuggest suggestFromThisPc() {
 
   const ResolutionPreset beforeVram = out.resolution;
   applyVramCap(out);
+  applyMmeFaceCap(out);
   if (out.resolution != beforeVram) {
     // Retarget tier label after VRAM clamp.
     if (out.resolution == ResolutionPreset::Res8K) tier = tr.hwSuggestHigh;

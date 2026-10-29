@@ -10,6 +10,8 @@ GitHub Release Full Changelog → this file on the release tag.
 --------------------------------------------------------------------------------
 
 ### 追加 / Added
+- JA: **AV1 エンコード**（av1_nvenc / QSV / AMF / libsvtav1）。不可時は HEVC → H.264 へ自動フォールバック
+  EN: **AV1 encode** (av1_nvenc / QSV / AMF / libsvtav1); falls back to HEVC then H.264 when unavailable
 - JA: **連番形式を選択可能**（自動 / PNG / JPEG q92）。再開時は既存ファイルの拡張子に合わせる
   EN: **Choose sequence format** (Auto / PNG / JPEG q92); resume keeps the extension already on disk
 - JA: **ディスク空き不足でキャプチャを自動一時停止**（残り約2GB未満）。空き確保後に「再開」
@@ -38,6 +40,20 @@ GitHub Release Full Changelog → this file on the release tag.
   EN: 8K storage warnings in the resolution combo, size line, and notes (JA+EN)
 
 ### 修正 / Fixed
+- JA: **完了ダイアログが「HW不可」と誤表示する**: HEVC NVENC成功＋巨大フレーム縮小だけのときもHW失敗に見えていた文言を修正
+  EN: **Done dialog falsely said HW unavailable**: clarify wording when HEVC NVENC succeeded and only oversized frames were scaled
+- JA: **8Kキャプチャ中にMMEがGetViewportで8K作業RTを再確保する**: GetViewportをバックバッファ寸法に偽る。MME連鎖時の推奨面は4096止め
+  EN: **MME re-allocated 8K work RTs from GetViewport during capture**: lie GetViewport as backbuffer size; MME-chained face suggest caps at 4096
+- JA: **ネイティブ8KでVRAMが16GBまで膨れる**: screenWidthを8Kにせず、MMEが見るviewportはバックバッファ寸法のまま／capture RTだけ8K
+  EN: **Native 8K blew VRAM to 16GB**: leave screenWidth alone so MME keeps backbuffer-sized viewports; only the capture RT is 8K
+- JA: **ネイティブ8K中の毎フレーム8Kダウンサンプルを抑止**: MMD録画用の巨大SYSTEMMEM読取をフックでスキップ
+  EN: **Skip per-frame 8K downsample during native capture**: hook out MMD's huge SYSTEMMEM recorder readback
+- JA: **MSAA有効時にネイティブ8Kが gate busy で起動しない**: キャプチャ中だけ captureSurface ゲートを0に退避／復元
+  EN: **Native 8K refused with MSAA (gate busy)**: temporarily force the captureSurface gate to 0 during capture and restore it
+- JA: **ネイティブ8KがMME Resetで即落ちする**: スワップチェインは触らず、8192のオフスクリーンRT+Depthだけを録画スロットへ載せる
+  EN: **Native 8K instant-crashed on MME Reset**: leave the swapchain alone; attach an 8192 offscreen RT+depth to the recorder slots only
+- JA: **ネイティブ8KのMME ResetがPresent中に即落ちする**: ResetをPresent完了後へ移し、フック済みMMEプロキシ経由でのみ実行
+  EN: **Native 8K MME Reset crashed inside Present**: run Reset only after Present returns, and only through the hooked MME proxy
 - JA: **ネイティブ8K Reset直後にMMEが壊れて落ちる**: FrameDriver中のPostDeviceResetをやめ、Present直前にフック済みMMEデバイス経由でResetするよう変更
   EN: **MME broke and MMD crashed right after native 8K Reset**: stop PostDeviceReset inside FrameDriver; Reset through the hooked MME device just before Present
 - JA: **ネイティブ8K初期化中にMMDが落ちる／ジョブが早期中止する**: 高解像度RTの生成・bind・viewport更新が完了する前に開始成功を通知していた競合を解消

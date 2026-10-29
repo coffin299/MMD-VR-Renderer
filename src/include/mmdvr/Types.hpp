@@ -26,12 +26,14 @@ enum class QualityPreset : int {
 
 // MP4 encoder for FFmpeg. Default is Auto (hardware H.265 when available).
 // UI values keep legacy names; runtime prefers HEVC (hevc_nvenc / libx265) over H.264.
+// Av1 prefers AV1 HW/soft then falls back to the same HEVC chain.
 enum class EncodeCodec : int {
   Libx264 = 0, // CPU soft: libx265 → libx264
   Auto = 1,    // default: HEVC HW → libx265 → H.264 HW → libx264
   Nvenc = 2,   // hevc_nvenc → h264_nvenc → soft
   Qsv = 3,     // hevc_qsv → h264_qsv → soft
-  Amf = 4      // hevc_amf → h264_amf → soft
+  Amf = 4,     // hevc_amf → h264_amf → soft
+  Av1 = 5      // av1_nvenc/qsv/amf → libsvtav1 → HEVC chain → soft
 };
 
 // Frame sequence on disk (under outputDir\\frames).

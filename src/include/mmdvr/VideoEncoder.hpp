@@ -12,6 +12,10 @@ struct FfmpegCaps {
   bool hasHevcQsv = false;
   bool hasHevcAmf = false;
   bool hasLibx265 = false;
+  bool hasAv1Nvenc = false;
+  bool hasAv1Qsv = false;
+  bool hasAv1Amf = false;
+  bool hasLibSvtAv1 = false;
   bool hasH264Nvenc = false;
   bool hasH264Qsv = false;
   bool hasH264Amf = false;
@@ -19,6 +23,10 @@ struct FfmpegCaps {
   bool listedHevcQsv = false;
   bool listedHevcAmf = false;
   bool listedLibx265 = false;
+  bool listedAv1Nvenc = false;
+  bool listedAv1Qsv = false;
+  bool listedAv1Amf = false;
+  bool listedLibSvtAv1 = false;
   bool listedH264Nvenc = false;
   bool listedH264Qsv = false;
   bool listedH264Amf = false;

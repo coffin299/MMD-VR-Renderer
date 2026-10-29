@@ -404,15 +404,16 @@ static void applyLabels(HWND hDlg) {
   const wchar_t* qualityItems[] = { s.comboHigh, s.comboBalanced, s.comboFast };
   const wchar_t* resItems[] = { s.comboRes2K, s.comboRes3K, s.comboRes4K, s.comboRes8K };
   const wchar_t* codecItems[] = {
-    s.comboCodecLibx264, s.comboCodecAuto, s.comboCodecNvenc, s.comboCodecQsv, s.comboCodecAmf
+    s.comboCodecLibx264, s.comboCodecAuto, s.comboCodecNvenc, s.comboCodecQsv, s.comboCodecAmf,
+    s.comboCodecAv1
   };
   refillCombo(hDlg, IDC_STEREO, stereoItems, 2, stereoSel);
   refillCombo(hDlg, IDC_QUALITY, qualityItems, 3, qualitySel);
   refillCombo(hDlg, IDC_RESOLUTION, resItems, 4, resSel);
-  refillCombo(hDlg, IDC_ENCODE_CODEC, codecItems, 5, codecSel < 0 ? 0 : codecSel);
+  refillCombo(hDlg, IDC_ENCODE_CODEC, codecItems, 6, codecSel < 0 ? 0 : codecSel);
   int reCodecSel = (int)SendDlgItemMessageW(hDlg, IDC_REENCODE_CODEC, CB_GETCURSEL, 0, 0);
   int reStereoSel = (int)SendDlgItemMessageW(hDlg, IDC_REENCODE_STEREO, CB_GETCURSEL, 0, 0);
-  refillCombo(hDlg, IDC_REENCODE_CODEC, codecItems, 5, reCodecSel < 0 ? (int)EncodeCodec::Auto : reCodecSel);
+  refillCombo(hDlg, IDC_REENCODE_CODEC, codecItems, 6, reCodecSel < 0 ? (int)EncodeCodec::Auto : reCodecSel);
   refillCombo(hDlg, IDC_REENCODE_STEREO, stereoItems, 2, reStereoSel < 0 ? 1 : reStereoSel);
   int seqSel = (int)SendDlgItemMessageW(hDlg, IDC_SEQ_FMT, CB_GETCURSEL, 0, 0);
   const wchar_t* seqItems[] = { s.comboSeqAuto, s.comboSeqPng, s.comboSeqJpeg };
@@ -581,7 +582,7 @@ static INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM) {
       s.audioPath = getText(hDlg, IDC_AUDIO);
       s.cubemapFaces = IsDlgButtonChecked(hDlg, IDC_CUBEMAP) == BST_CHECKED;
       int codecIdx = (int)SendDlgItemMessageW(hDlg, IDC_ENCODE_CODEC, CB_GETCURSEL, 0, 0);
-      if (codecIdx < 0 || codecIdx > (int)EncodeCodec::Amf)
+      if (codecIdx < 0 || codecIdx > (int)EncodeCodec::Av1)
         codecIdx = (int)EncodeCodec::Auto;
       s.encodeCodec = (EncodeCodec)codecIdx;
       g_ok = true;
@@ -641,7 +642,7 @@ static INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM) {
       double fps = _wtof(getText(hDlg, IDC_REENCODE_FPS).c_str());
       if (fps < 1.0) fps = 60.0;
       int codecIdx = (int)SendDlgItemMessageW(hDlg, IDC_REENCODE_CODEC, CB_GETCURSEL, 0, 0);
-      if (codecIdx < 0 || codecIdx > (int)EncodeCodec::Amf)
+      if (codecIdx < 0 || codecIdx > (int)EncodeCodec::Av1)
         codecIdx = (int)EncodeCodec::Auto;
       const EncodeCodec codec = (EncodeCodec)codecIdx;
       const std::wstring audio = getText(hDlg, IDC_REENCODE_AUDIO);

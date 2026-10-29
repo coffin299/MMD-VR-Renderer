@@ -144,6 +144,10 @@ enum class EncImpl : int {
   HevcQsv,
   HevcAmf,
   Libx265,
+  Av1Nvenc,
+  Av1Qsv,
+  Av1Amf,
+  LibSvtAv1,
   H264Nvenc,
   H264Qsv,
   H264Amf,
@@ -156,6 +160,10 @@ static const wchar_t* implLabel(EncImpl i) {
   case EncImpl::HevcQsv: return L"HEVC QSV";
   case EncImpl::HevcAmf: return L"HEVC AMF";
   case EncImpl::Libx265: return L"libx265";
+  case EncImpl::Av1Nvenc: return L"AV1 NVENC";
+  case EncImpl::Av1Qsv: return L"AV1 QSV";
+  case EncImpl::Av1Amf: return L"AV1 AMF";
+  case EncImpl::LibSvtAv1: return L"libsvtav1";
   case EncImpl::H264Nvenc: return L"H264 NVENC";
   case EncImpl::H264Qsv: return L"H264 QSV";
   case EncImpl::H264Amf: return L"H264 AMF";
@@ -174,6 +182,15 @@ static std::wstring implArgs(EncImpl i) {
     return L" -c:v hevc_amf -pix_fmt yuv420p -rc cqp -qp_i 18 -qp_p 18 -tag:v hvc1 ";
   case EncImpl::Libx265:
     return L" -c:v libx265 -pix_fmt yuv420p -crf 20 -preset medium -tag:v hvc1 ";
+  case EncImpl::Av1Nvenc:
+    return L" -c:v av1_nvenc -pix_fmt yuv420p -preset p5 -cq 19 -b:v 0 -tag:v av01 ";
+  case EncImpl::Av1Qsv:
+    return L" -c:v av1_qsv -pix_fmt yuv420p -global_quality 22 -tag:v av01 ";
+  case EncImpl::Av1Amf:
+    return L" -c:v av1_amf -pix_fmt yuv420p -rc cqp -qp_i 18 -qp_p 18 -tag:v av01 ";
+  case EncImpl::LibSvtAv1:
+    // preset 6 ≈ balanced; faster than libaom for long VR jobs.
+    return L" -c:v libsvtav1 -pix_fmt yuv420p -crf 25 -preset 6 -tag:v av01 ";
   case EncImpl::H264Nvenc:
     return L" -c:v h264_nvenc -pix_fmt yuv420p -preset p5 -cq 19 -b:v 0 ";
   case EncImpl::H264Qsv:
@@ -223,6 +240,10 @@ static int implMaxEdge(EncImpl i) {
   case EncImpl::HevcQsv:
   case EncImpl::HevcAmf:
     return 8192;
+  case EncImpl::Av1Nvenc:
+  case EncImpl::Av1Qsv:
+  case EncImpl::Av1Amf:
+    return 8192; // Ada/AV1 HW practical edge; soft uses luma budget only
   case EncImpl::H264Nvenc:
     return 8192;
   case EncImpl::H264Qsv:
@@ -243,6 +264,11 @@ static void fitImplEncodeSize(EncImpl i, int srcW, int srcH, int& outW, int& out
   case EncImpl::HevcNvenc:
   case EncImpl::HevcQsv:
   case EncImpl::HevcAmf:
+  case EncImpl::LibSvtAv1:
+  case EncImpl::Av1Nvenc:
+  case EncImpl::Av1Qsv:
+  case EncImpl::Av1Amf:
+    // AV1 levels allow huge frames; reuse HEVC Level 7.2 luma as a safe soft/HW budget.
     fitHevcEncodeSize(srcW, srcH, outW, outH);
     break;
   case EncImpl::Libx264:
@@ -265,7 +291,7 @@ static bool implSupportsSize(EncImpl i, int frameW, int frameH) {
   if (frameW <= 0 || frameH <= 0) return true;
   if ((frameW & 1) || (frameH & 1)) return false;
   const long long luma = static_cast<long long>(frameW) * static_cast<long long>(frameH);
-  if (i == EncImpl::Libx265) return luma <= kHevcMaxLumaSamples;
+  if (i == EncImpl::Libx265 || i == EncImpl::LibSvtAv1) return luma <= kHevcMaxLumaSamples;
   if (i == EncImpl::Libx264) return luma <= kH264MaxLumaSamples;
   const int maxEdge = implMaxEdge(i);
   return frameW <= maxEdge && frameH <= maxEdge;
@@ -277,6 +303,10 @@ static bool implAvailable(EncImpl i, const FfmpegCaps& caps) {
   case EncImpl::HevcQsv: return caps.hasHevcQsv;
   case EncImpl::HevcAmf: return caps.hasHevcAmf;
   case EncImpl::Libx265: return caps.hasLibx265;
+  case EncImpl::Av1Nvenc: return caps.hasAv1Nvenc;
+  case EncImpl::Av1Qsv: return caps.hasAv1Qsv;
+  case EncImpl::Av1Amf: return caps.hasAv1Amf;
+  case EncImpl::LibSvtAv1: return caps.hasLibSvtAv1;
   case EncImpl::H264Nvenc: return caps.hasH264Nvenc;
   case EncImpl::H264Qsv: return caps.hasH264Qsv;
   case EncImpl::H264Amf: return caps.hasH264Amf;
@@ -291,6 +321,10 @@ static bool implListed(EncImpl i, const FfmpegCaps& caps) {
   case EncImpl::HevcQsv: return caps.listedHevcQsv;
   case EncImpl::HevcAmf: return caps.listedHevcAmf;
   case EncImpl::Libx265: return caps.listedLibx265;
+  case EncImpl::Av1Nvenc: return caps.listedAv1Nvenc;
+  case EncImpl::Av1Qsv: return caps.listedAv1Qsv;
+  case EncImpl::Av1Amf: return caps.listedAv1Amf;
+  case EncImpl::LibSvtAv1: return caps.listedLibSvtAv1;
   case EncImpl::H264Nvenc: return caps.listedH264Nvenc;
   case EncImpl::H264Qsv: return caps.listedH264Qsv;
   case EncImpl::H264Amf: return caps.listedH264Amf;
@@ -301,7 +335,7 @@ static bool implListed(EncImpl i, const FfmpegCaps& caps) {
 
 static bool smokeTestImpl(const std::wstring& ff, EncImpl impl) {
   if (impl == EncImpl::Libx264) return true;
-  if (impl == EncImpl::Libx265) {
+  if (impl == EncImpl::Libx265 || impl == EncImpl::LibSvtAv1) {
     // Presence in -encoders is enough for soft; skip slow smoke.
     return true;
   }
@@ -357,13 +391,28 @@ static std::vector<EncImpl> buildCandidates(EncodeCodec requested, const FfmpegC
     appendUnique(raw, EncImpl::Libx265);
     appendUnique(raw, EncImpl::Libx264);
     break;
+  case EncodeCodec::Av1:
+    // AV1 HW → soft → HEVC chain → H.264 soft last.
+    appendUnique(raw, EncImpl::Av1Nvenc);
+    appendUnique(raw, EncImpl::Av1Qsv);
+    appendUnique(raw, EncImpl::Av1Amf);
+    appendUnique(raw, EncImpl::LibSvtAv1);
+    appendUnique(raw, EncImpl::HevcNvenc);
+    appendUnique(raw, EncImpl::HevcQsv);
+    appendUnique(raw, EncImpl::HevcAmf);
+    appendUnique(raw, EncImpl::Libx265);
+    appendUnique(raw, EncImpl::H264Nvenc);
+    appendUnique(raw, EncImpl::H264Qsv);
+    appendUnique(raw, EncImpl::H264Amf);
+    appendUnique(raw, EncImpl::Libx264);
+    break;
   case EncodeCodec::Libx264:
     appendUnique(raw, EncImpl::Libx265);
     appendUnique(raw, EncImpl::Libx264);
     break;
   case EncodeCodec::Auto:
   default:
-    // HEVC HW → libx265 → H.264 HW → libx264
+    // HEVC HW → libx265 → H.264 HW → libx264 (Auto stays H.265-first; use Av1 picker for AV1)
     appendUnique(raw, EncImpl::HevcNvenc);
     appendUnique(raw, EncImpl::HevcQsv);
     appendUnique(raw, EncImpl::HevcAmf);
@@ -381,8 +430,10 @@ static std::vector<EncImpl> buildCandidates(EncodeCodec requested, const FfmpegC
     if (!ignoreSize && !implSupportsSize(i, frameW, frameH)) continue;
     appendUnique(out, i);
   }
-  // Prefer staying on HEVC: if nothing fits the native size, caller will scale
-  // down to Level 7.2 and retry with libx265 — do not invent a doomed libx264.
+  // Prefer staying on HEVC/AV1: if nothing fits the native size, caller will scale
+  // down to Level 7.2 and retry with soft — do not invent a doomed libx264.
+  if (out.empty() && caps.hasLibSvtAv1 && requested == EncodeCodec::Av1)
+    appendUnique(out, EncImpl::LibSvtAv1);
   if (out.empty() && caps.hasLibx265) appendUnique(out, EncImpl::Libx265);
   else if (out.empty()) appendUnique(out, EncImpl::Libx264);
   return out;
@@ -406,6 +457,11 @@ static EncImpl preferredImpl(EncodeCodec requested, const FfmpegCaps& caps) {
   case EncodeCodec::Amf:
     wish = {EncImpl::HevcAmf, EncImpl::H264Amf, EncImpl::Libx265, EncImpl::Libx264};
     break;
+  case EncodeCodec::Av1:
+    wish = {EncImpl::Av1Nvenc, EncImpl::Av1Qsv, EncImpl::Av1Amf, EncImpl::LibSvtAv1,
+            EncImpl::HevcNvenc, EncImpl::HevcQsv, EncImpl::HevcAmf, EncImpl::Libx265,
+            EncImpl::Libx264};
+    break;
   case EncodeCodec::Libx264:
     wish = {EncImpl::Libx265, EncImpl::Libx264};
     break;
@@ -423,7 +479,8 @@ static EncImpl preferredImpl(EncodeCodec requested, const FfmpegCaps& caps) {
 
 bool VideoEncoder::codecSupportsSize(EncodeCodec codec, int frameW, int frameH) {
   if (frameW <= 0 || frameH <= 0) return true;
-  if (codec == EncodeCodec::Libx264 || codec == EncodeCodec::Auto) return true;
+  if (codec == EncodeCodec::Libx264 || codec == EncodeCodec::Auto || codec == EncodeCodec::Av1)
+    return true;
   EncImpl hevc = EncImpl::HevcNvenc;
   EncImpl h264 = EncImpl::H264Nvenc;
   if (codec == EncodeCodec::Qsv) {
@@ -456,15 +513,24 @@ FfmpegCaps VideoEncoder::probe(const std::wstring& preferred) {
     caps.listedHevcQsv = text.find("hevc_qsv") != std::string::npos;
     caps.listedHevcAmf = text.find("hevc_amf") != std::string::npos;
     caps.listedLibx265 = text.find("libx265") != std::string::npos;
+    caps.listedAv1Nvenc = text.find("av1_nvenc") != std::string::npos;
+    caps.listedAv1Qsv = text.find("av1_qsv") != std::string::npos;
+    caps.listedAv1Amf = text.find("av1_amf") != std::string::npos;
+    caps.listedLibSvtAv1 = text.find("libsvtav1") != std::string::npos;
     caps.listedH264Nvenc = text.find("h264_nvenc") != std::string::npos;
     caps.listedH264Qsv = text.find("h264_qsv") != std::string::npos;
     caps.listedH264Amf = text.find("h264_amf") != std::string::npos;
 
     caps.hasLibx265 = caps.listedLibx265;
+    caps.hasLibSvtAv1 = caps.listedLibSvtAv1;
     caps.hasHevcNvenc =
         caps.listedHevcNvenc && smokeTestImpl(caps.path, EncImpl::HevcNvenc);
     caps.hasHevcQsv = caps.listedHevcQsv && smokeTestImpl(caps.path, EncImpl::HevcQsv);
     caps.hasHevcAmf = caps.listedHevcAmf && smokeTestImpl(caps.path, EncImpl::HevcAmf);
+    caps.hasAv1Nvenc =
+        caps.listedAv1Nvenc && smokeTestImpl(caps.path, EncImpl::Av1Nvenc);
+    caps.hasAv1Qsv = caps.listedAv1Qsv && smokeTestImpl(caps.path, EncImpl::Av1Qsv);
+    caps.hasAv1Amf = caps.listedAv1Amf && smokeTestImpl(caps.path, EncImpl::Av1Amf);
     caps.hasH264Nvenc =
         caps.listedH264Nvenc && smokeTestImpl(caps.path, EncImpl::H264Nvenc);
     caps.hasH264Qsv = caps.listedH264Qsv && smokeTestImpl(caps.path, EncImpl::H264Qsv);
@@ -475,6 +541,8 @@ FfmpegCaps VideoEncoder::probe(const std::wstring& preferred) {
         L" hevc_nvenc=" + (caps.hasHevcNvenc ? L"1" : (caps.listedHevcNvenc ? L"listed-fail" : L"0")) +
         L" hevc_qsv=" + (caps.hasHevcQsv ? L"1" : (caps.listedHevcQsv ? L"listed-fail" : L"0")) +
         L" hevc_amf=" + (caps.hasHevcAmf ? L"1" : (caps.listedHevcAmf ? L"listed-fail" : L"0")) +
+        L" av1_nvenc=" + (caps.hasAv1Nvenc ? L"1" : (caps.listedAv1Nvenc ? L"listed-fail" : L"0")) +
+        L" libsvtav1=" + (caps.hasLibSvtAv1 ? L"1" : L"0") +
         L" libx265=" + (caps.hasLibx265 ? L"1" : L"0") +
         L" h264_nvenc=" + (caps.hasH264Nvenc ? L"1" : (caps.listedH264Nvenc ? L"listed-fail" : L"0")));
   } else {
@@ -492,6 +560,10 @@ EncodeCodec VideoEncoder::resolveCodec(EncodeCodec requested, const FfmpegCaps& 
   auto cands = buildCandidates(requested, caps, frameW, frameH, false);
   if (cands.empty()) return EncodeCodec::Libx264;
   switch (cands.front()) {
+  case EncImpl::Av1Nvenc:
+  case EncImpl::Av1Qsv:
+  case EncImpl::Av1Amf:
+  case EncImpl::LibSvtAv1: return EncodeCodec::Av1;
   case EncImpl::HevcNvenc:
   case EncImpl::H264Nvenc: return EncodeCodec::Nvenc;
   case EncImpl::HevcQsv:
@@ -509,6 +581,7 @@ const wchar_t* VideoEncoder::codecLabel(EncodeCodec codec) {
   case EncodeCodec::Nvenc: return L"HEVC NVENC";
   case EncodeCodec::Qsv: return L"HEVC QSV";
   case EncodeCodec::Amf: return L"HEVC AMF";
+  case EncodeCodec::Av1: return L"AV1";
   case EncodeCodec::Auto: return L"Auto";
   case EncodeCodec::Libx264:
   default: return L"libx265";
@@ -521,6 +594,7 @@ std::wstring VideoEncoder::codecArgs(EncodeCodec codec) {
   case EncodeCodec::Nvenc: return implArgs(EncImpl::HevcNvenc);
   case EncodeCodec::Qsv: return implArgs(EncImpl::HevcQsv);
   case EncodeCodec::Amf: return implArgs(EncImpl::HevcAmf);
+  case EncodeCodec::Av1: return implArgs(EncImpl::Av1Nvenc);
   case EncodeCodec::Auto:
   case EncodeCodec::Libx264:
   default: return implArgs(EncImpl::Libx265);
@@ -762,15 +836,17 @@ bool VideoEncoder::encodeSequence(
   // Always allow per-impl scale-into-cap. Huge stereo 8K (30720×7680) must still
   // pick hevc_nvenc (→~8192) before glacial libx265 — never drop to H.264 first.
   auto candidates = buildCandidates(codec, caps, /*frameW*/ 0, /*frameH*/ 0, /*ignoreSize*/ true);
-  if (caps.hasLibx265 || caps.hasHevcNvenc || caps.hasHevcQsv || caps.hasHevcAmf) {
-    std::vector<EncImpl> hevcOnly;
+  if (caps.hasLibx265 || caps.hasLibSvtAv1 || caps.hasHevcNvenc || caps.hasHevcQsv ||
+      caps.hasHevcAmf || caps.hasAv1Nvenc || caps.hasAv1Qsv || caps.hasAv1Amf) {
+    // Prefer AV1/HEVC over H.264 when any modern encoder is usable.
+    std::vector<EncImpl> modernOnly;
     for (auto i : candidates) {
       if (i == EncImpl::H264Nvenc || i == EncImpl::H264Qsv || i == EncImpl::H264Amf ||
           i == EncImpl::Libx264)
         continue;
-      hevcOnly.push_back(i);
+      modernOnly.push_back(i);
     }
-    if (!hevcOnly.empty()) candidates.swap(hevcOnly);
+    if (!modernOnly.empty()) candidates.swap(modernOnly);
   }
 
   auto setFallback = [&](EncImpl from, EncImpl to) {
@@ -798,18 +874,24 @@ bool VideoEncoder::encodeSequence(
       std::snprintf(msg, sizeof(msg),
                     "FFmpeg scale for %s: %dx%d → %dx%d (PNG stays full-res)",
                     (useImpl == EncImpl::Libx265)             ? "libx265/Level7.2"
+                    : (useImpl == EncImpl::LibSvtAv1)         ? "libsvtav1"
                     : (useImpl == EncImpl::HevcNvenc)         ? "HEVC NVENC"
                     : (useImpl == EncImpl::HevcQsv)           ? "HEVC QSV"
                     : (useImpl == EncImpl::HevcAmf)           ? "HEVC AMF"
+                    : (useImpl == EncImpl::Av1Nvenc)          ? "AV1 NVENC"
+                    : (useImpl == EncImpl::Av1Qsv)            ? "AV1 QSV"
+                    : (useImpl == EncImpl::Av1Amf)            ? "AV1 AMF"
                                                               : "encoder limit",
                     frameW, frameH, w, h);
       Diagnostics::instance().warn(msg);
       if (fallbackOut) {
-        wchar_t note[128];
-        std::swprintf(note, 128, L"%s (%dx%d→%dx%d)", implLabel(useImpl), frameW, frameH, w, h);
+        // Scale note is not an encoder fallback; keep wording distinct from "A → B".
+        wchar_t note[160];
+        std::swprintf(note, 160, L"%s (scale %dx%d→%dx%d)", implLabel(useImpl), frameW, frameH, w,
+                      h);
         if (fallbackOut->empty())
           *fallbackOut = note;
-        else if (fallbackOut->find(L"→") != std::wstring::npos)
+        else
           *fallbackOut += std::wstring(L" · ") + note;
       }
     }
