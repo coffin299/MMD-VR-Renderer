@@ -649,6 +649,7 @@ bool MmdTimeline::applyCameraFace(
       Diagnostics::instance().info(msg);
     }
   }
+  PluginHost::instance().latchCubemapCamera(state);
   if (!applyCamera(state)) return false;
 
   // Per-face readback logs were drowning the job log (10×/frame × thousands).

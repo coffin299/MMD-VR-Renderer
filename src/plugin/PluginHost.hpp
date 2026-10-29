@@ -71,6 +71,9 @@ public:
 
   // While set, Presents still draw but are not stored as cubemap faces.
   void deferCapturePresents(bool defer);
+  // Cubemap face camera. Written into MMD's camera fields at BeginScene, after
+  // the motion key has been applied, so ray-mmd lights the new direction.
+  void latchCubemapCamera(const MmdCameraUiState& state);
   // UI-thread safe: drop capture request and wake renderView waiters only.
   void interruptCaptureWait(const char* reason);
   // Job-worker / device-reset: restore MMD camera, drop hooks, release pool.
@@ -90,6 +93,7 @@ private:
   D3D9CaptureBackend capture_;
   MmdTimeline timeline_;
   MmdCameraUiState nativeCameraBase_{};
+  MmdCameraUiState latchedCubemapCamera_{};
   bool nativeCameraApplied_ = false;
   bool mmdOutputSizeConfigured_ = false;
   // Actual MMD「出力サイズ」we applied (may be capped below UI faceSize).

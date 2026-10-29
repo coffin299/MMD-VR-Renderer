@@ -327,6 +327,34 @@ void PluginHost::deferCapturePresents(bool defer) {
   if (defer) capture_.clearStagedSurface();
 }
 
+void PluginHost::latchCubemapCamera(const MmdCameraUiState& state) {
+  latchedCubemapCamera_ = state;
+}
+
+// MMD 9.32 x64 camera fields. UI degrees; memory yaw/roll are radians, pitch is
+// negated, distance is negated. Written at BeginScene so the frame's camera key
+// cannot put ray-mmd back on the motion camera (dark / repeated subject).
+void writeLatchedCubemapCamera(void* app, const MmdCameraUiState& state) {
+  if (!app || !state.valid) return;
+  constexpr float kPi = 3.1415926535f;
+  constexpr uintptr_t kPitch = 0x348;
+  constexpr uintptr_t kYaw = 0x34C;
+  constexpr uintptr_t kRoll = 0x350;
+  constexpr uintptr_t kPos = 0x36C;
+  constexpr uintptr_t kDistance = 0xA1900;
+  auto* base = reinterpret_cast<std::uint8_t*>(app);
+  auto put = [&](uintptr_t off, float v) {
+    *reinterpret_cast<float*>(base + off) = v;
+  };
+  put(kPos + 0, static_cast<float>(state.x));
+  put(kPos + 4, static_cast<float>(state.y));
+  put(kPos + 8, static_cast<float>(state.z));
+  put(kPitch, static_cast<float>(-state.rotX * kPi / 180.0));
+  put(kYaw, static_cast<float>(state.rotY * kPi / 180.0));
+  put(kRoll, static_cast<float>(state.rotZ * kPi / 180.0));
+  put(kDistance, static_cast<float>(-state.distance));
+}
+
 bool PluginHost::expandNativeCaptureViewport(D3DVIEWPORT9& vp) const {
   if (!nativeCaptureSurfaceActive() || mmdOutputFaceSize_ <= 0) return false;
   if (bbW_ <= 0 || bbH_ <= 0) return false;
@@ -766,8 +794,10 @@ void PluginHost::stagePreOverlaySource(
 
   if (capture_.hasStagedSurface()) {
     int sw = 0, sh = 0;
-    if (capture_.stagedSize(sw, sh) && scoreCandidate(sw, sh) >= score)
-      return; // keep equal-or-better staged copy
+    // A later pass at the same size is ray's lit/tonemapped color. The first
+    // face-sized target is the unlit G-buffer and reads as a dark frame.
+    if (capture_.stagedSize(sw, sh) && scoreCandidate(sw, sh) > score)
+      return;
   }
 
   // Stage at source size when we accepted a near-face square; only force
@@ -970,6 +1000,12 @@ void PluginHost::onBeginScene(IDirect3DDevice9* device) {
   didReplaceThisFrame_ = false;
   onMainRt_ = true;
   havePendingObservedView_ = false;
+  // The motion camera key overwrites the edit boxes before this point. Put the
+  // cubemap face back so ray-mmd's lighting and main view share that direction.
+  if (wantCapture_ && latchedCubemapCamera_.valid && nativeCaptureSurfaceActive()) {
+    writeLatchedCubemapCamera(mmdApp_.load(std::memory_order_acquire),
+                              latchedCubemapCamera_);
+  }
   // Seed the main scene with the face camera. The hook is active here, so the
   // calls below still take the normal MinHook dispatch route.
   if (device && controller_.camera().overrideActive() && IsTransformOverrideEnabled()) {
@@ -1425,9 +1461,9 @@ bool PluginHost::renderView(const CameraState& cam, ImageBuffer& out) {
     std::lock_guard<std::mutex> lock(redrawMu_);
     captureReady_ = false;
     setCaptureArmed(true);
-    // ray-mmd latches the camera on the frame after the edit commit. The first
-    // Present is still the previous direction (character repeated on side faces).
-    skipCaptures_ = 1;
+    // Camera fields are rewritten in BeginScene, so the Present of this face
+    // already has the cubemap direction. Do not drop it.
+    skipCaptures_ = 0;
     pendingCam_ = cam;
     preOverlayCandidateLogged_ = false;
   }

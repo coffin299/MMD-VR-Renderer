@@ -413,14 +413,14 @@ static std::vector<EncImpl> buildCandidates(EncodeCodec requested, const FfmpegC
     break;
   case EncodeCodec::Auto:
   default:
-    // HEVC HW → libx265 → H.264 HW → libx264 (Auto stays H.265-first; use Av1 picker for AV1)
+    // Default: av1_nvenc, then libx265. Other HW/soft only if both are missing.
+    appendUnique(raw, EncImpl::Av1Nvenc);
+    appendUnique(raw, EncImpl::Libx265);
     appendUnique(raw, EncImpl::HevcNvenc);
     appendUnique(raw, EncImpl::HevcQsv);
     appendUnique(raw, EncImpl::HevcAmf);
-    appendUnique(raw, EncImpl::Libx265);
+    appendUnique(raw, EncImpl::LibSvtAv1);
     appendUnique(raw, EncImpl::H264Nvenc);
-    appendUnique(raw, EncImpl::H264Qsv);
-    appendUnique(raw, EncImpl::H264Amf);
     appendUnique(raw, EncImpl::Libx264);
     break;
   }
@@ -468,8 +468,7 @@ static EncImpl preferredImpl(EncodeCodec requested, const FfmpegCaps& caps) {
     break;
   case EncodeCodec::Auto:
   default:
-    wish = {EncImpl::HevcNvenc, EncImpl::HevcQsv, EncImpl::HevcAmf, EncImpl::Libx265,
-            EncImpl::H264Nvenc, EncImpl::Libx264};
+    wish = {EncImpl::Av1Nvenc, EncImpl::Libx265, EncImpl::HevcNvenc, EncImpl::Libx264};
     break;
   }
   for (auto i : wish)
@@ -846,16 +845,6 @@ bool VideoEncoder::encodeSequence(
       modernOnly.push_back(i);
     }
     if (!modernOnly.empty()) candidates.swap(modernOnly);
-  }
-  // Stereo 8K SBS (30720×7680) fits in libx265 at 16384×4096 but NVENC must
-  // crush it to 8192×2046. Keep the encoder that preserves more pixels.
-  if (frameW > 0 && frameH > 0 && candidates.size() > 1) {
-    std::stable_sort(candidates.begin(), candidates.end(), [&](EncImpl a, EncImpl b) {
-      int aw = 0, ah = 0, bw = 0, bh = 0;
-      fitImplEncodeSize(a, frameW, frameH, aw, ah);
-      fitImplEncodeSize(b, frameW, frameH, bw, bh);
-      return static_cast<long long>(aw) * ah > static_cast<long long>(bw) * bh;
-    });
   }
 
   auto setFallback = [&](EncImpl from, EncImpl to) {
