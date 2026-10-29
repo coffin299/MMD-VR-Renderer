@@ -24,6 +24,9 @@ public:
   void onBeforeGetRenderTargetData(IDirect3DDevice9* device, IDirect3DSurface9* source);
   void onBeforeStretchRect(IDirect3DDevice9* device, IDirect3DSurface9* source,
                            IDirect3DSurface9* destination);
+  // Called before MMD switches RT 0 so the completed, outgoing color target
+  // can be staged before the next pass begins.
+  void onBeforeSetRenderTarget(IDirect3DDevice9* device, DWORD index);
   void onBeginScene(IDirect3DDevice9* device);
   void onSetRenderTarget(IDirect3DSurface9* rt);
   void onMainPassDraw();

@@ -208,6 +208,11 @@ void PluginHost::stagePreOverlaySource(
   D3DSURFACE_DESC desc{};
   if (FAILED(source->GetDesc(&desc)) || desc.Width == 0 || desc.Height == 0)
     return;
+  // ray-mmd allocates large R32F/G32R32F targets for depth/effect passes.
+  // They are not final color images and were overwriting the staged scene.
+  if (desc.Format == D3DFMT_R32F || desc.Format == D3DFMT_G32R32F ||
+      desc.Format == D3DFMT_A32B32G32R32F)
+    return;
 
   // Prefer the square we set via MMD「出力サイズ」(mmdOutputFaceSize_).
   const auto settings = controller_.settings();
@@ -400,12 +405,21 @@ void PluginHost::onSetRenderTarget(IDirect3DSurface9* rt) {
   const int tolW = bbW_ / 10 + 8;
   const int tolH = bbH_ / 10 + 8;
   onMainRt_ = (std::abs((int)d.Width - bbW_) <= tolW) && (std::abs((int)d.Height - bbH_) <= tolH);
+}
 
-  // ray-mmd / MMD may never StretchRect the 出力サイズ RT; catch it on SetRT.
-  if (device_ && mmdOutputFaceSize_ > 0) {
-    const int side = static_cast<int>((std::min)(d.Width, d.Height));
-    if (d.Width == d.Height && side >= 2048)
-      stagePreOverlaySource(device_, rt, "SetRenderTarget");
+void PluginHost::onBeforeSetRenderTarget(IDirect3DDevice9* device, DWORD index) {
+  if (!device || index != 0) return;
+  {
+    std::lock_guard<std::mutex> lock(redrawMu_);
+    if (!wantCapture_) return;
+  }
+  // Hook_SetRenderTarget runs before MMD changes RT 0. At this point its
+  // previous target contains a completed pass; staging the *new* target after
+  // the call grabbed ray-mmd's empty R32F effect/depth surfaces instead.
+  IDirect3DSurface9* outgoing = nullptr;
+  if (SUCCEEDED(device->GetRenderTarget(0, &outgoing)) && outgoing) {
+    stagePreOverlaySource(device, outgoing, "SetRenderTarget(outgoing)");
+    outgoing->Release();
   }
 }
 

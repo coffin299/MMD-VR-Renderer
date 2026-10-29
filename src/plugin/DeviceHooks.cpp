@@ -82,6 +82,8 @@ static HRESULT WINAPI Hook_StretchRect(
 }
 
 static HRESULT WINAPI Hook_SetRenderTarget(IDirect3DDevice9* self, DWORD index, IDirect3DSurface9* rt) {
+  if (index == 0)
+    PluginHost::instance().onBeforeSetRenderTarget(self, index);
   HRESULT hr = g_SetRenderTarget(self, index, rt);
   if (index == 0)
     PluginHost::instance().onSetRenderTarget(rt);
