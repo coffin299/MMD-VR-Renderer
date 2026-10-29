@@ -23,6 +23,7 @@ using SetTransform_t = HRESULT (WINAPI*)(IDirect3DDevice9*, D3DTRANSFORMSTATETYP
 using GetTransform_t = HRESULT (WINAPI*)(IDirect3DDevice9*, D3DTRANSFORMSTATETYPE, D3DMATRIX*);
 using SetRenderTarget_t = HRESULT (WINAPI*)(IDirect3DDevice9*, DWORD, IDirect3DSurface9*);
 using BeginScene_t = HRESULT (WINAPI*)(IDirect3DDevice9*);
+using SetViewport_t = HRESULT (WINAPI*)(IDirect3DDevice9*, const D3DVIEWPORT9*);
 using GetViewport_t = HRESULT (WINAPI*)(IDirect3DDevice9*, D3DVIEWPORT9*);
 using DrawPrimitive_t = HRESULT (WINAPI*)(IDirect3DDevice9*, D3DPRIMITIVETYPE, UINT, UINT);
 using DrawIndexedPrimitive_t = HRESULT (WINAPI*)(IDirect3DDevice9*, D3DPRIMITIVETYPE, INT, UINT, UINT, UINT, UINT);
@@ -42,6 +43,7 @@ static SetTransform_t g_SetTransform = nullptr;
 static GetTransform_t g_GetTransform = nullptr;
 static SetRenderTarget_t g_SetRenderTarget = nullptr;
 static BeginScene_t g_BeginScene = nullptr;
+static SetViewport_t g_SetViewport = nullptr;
 static GetViewport_t g_GetViewport = nullptr;
 static DrawPrimitive_t g_DrawPrimitive = nullptr;
 static DrawIndexedPrimitive_t g_DrawIndexedPrimitive = nullptr;
@@ -205,23 +207,18 @@ static HRESULT WINAPI Hook_SetRenderTarget(IDirect3DDevice9* self, DWORD index, 
   return hr;
 }
 
+static HRESULT WINAPI Hook_SetViewport(IDirect3DDevice9* self, const D3DVIEWPORT9* vp) {
+  if (!vp) return g_SetViewport(self, vp);
+  D3DVIEWPORT9 expanded = *vp;
+  if (PluginHost::instance().expandNativeCaptureViewport(expanded))
+    return g_SetViewport(self, &expanded);
+  return g_SetViewport(self, vp);
+}
+
 static HRESULT WINAPI Hook_GetViewport(IDirect3DDevice9* self, D3DVIEWPORT9* vp) {
-  HRESULT hr = g_GetViewport(self, vp);
-  // MME/ray size work RTs from GetViewport. During native 8K capture the raster
-  // viewport is face-sized; report the backbuffer size so effect buffers stay
-  // near window resolution while geometry still fills the 8K capture RT.
-  int lieW = 0, lieH = 0;
-  if (SUCCEEDED(hr) && vp &&
-      PluginHost::instance().nativeCaptureMmeViewportSize(lieW, lieH)) {
-    if (vp->Width > static_cast<DWORD>(lieW) ||
-        vp->Height > static_cast<DWORD>(lieH)) {
-      vp->X = 0;
-      vp->Y = 0;
-      vp->Width = static_cast<DWORD>(lieW);
-      vp->Height = static_cast<DWORD>(lieH);
-    }
-  }
-  return hr;
+  // Report the real viewport. Lying the window size made ray-mmd shade a 16:9
+  // band on the square capture face (thin strips in the equirect).
+  return g_GetViewport(self, vp);
 }
 
 static HRESULT WINAPI Hook_BeginScene(IDirect3DDevice9* self) {
@@ -300,6 +297,7 @@ void HookDevice(IDirect3DDevice9* device) {
   void* pStretchRect = vtable_slot(device, 34);
   void* pSetRT = vtable_slot(device, 37);
   void* pBegin = vtable_slot(device, 41);
+  void* pSetViewport = vtable_slot(device, 46);
   void* pGetViewport = vtable_slot(device, 47);
   void* pSetTransform = vtable_slot(device, 44);
   void* pGetTransform = vtable_slot(device, 45);
@@ -316,6 +314,7 @@ void HookDevice(IDirect3DDevice9* device) {
     MH_CreateHook(pStretchRect, &Hook_StretchRect, (LPVOID*)&g_StretchRect);
     MH_CreateHook(pSetRT, &Hook_SetRenderTarget, (LPVOID*)&g_SetRenderTarget);
     MH_CreateHook(pBegin, &Hook_BeginScene, (LPVOID*)&g_BeginScene);
+    MH_CreateHook(pSetViewport, &Hook_SetViewport, (LPVOID*)&g_SetViewport);
     MH_CreateHook(pGetViewport, &Hook_GetViewport, (LPVOID*)&g_GetViewport);
     MH_CreateHook(pSetTransform, &Hook_SetTransform, (LPVOID*)&g_SetTransform);
     MH_CreateHook(pGetTransform, &Hook_GetTransform, (LPVOID*)&g_GetTransform);
@@ -326,7 +325,7 @@ void HookDevice(IDirect3DDevice9* device) {
                   (LPVOID*)&g_DrawIndexedPrimitiveUP);
     MH_EnableHook(MH_ALL_HOOKS);
     Diagnostics::instance().info(
-        "Device hooks installed (Present/Reset/GetRenderTargetData/StretchRect/SetRT/BeginScene/GetViewport/Set|GetTransform/Draw*+UP)");
+        "Device hooks installed (Present/Reset/GetRenderTargetData/StretchRect/SetRT/BeginScene/Set|GetViewport/Set|GetTransform/Draw*+UP)");
   }
   PluginHost::instance().onDeviceCreated(device);
 }

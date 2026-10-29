@@ -29,10 +29,11 @@ public:
   bool nativeCaptureSurfaceActive() const {
     return nativeCaptureState_.load(std::memory_order_acquire) == 3;
   }
-  // faceSized=false → backbuffer viewport (what MME SasRefreshViewport must see).
-  // faceSized=true  → face viewport for Clear / model draw into captureSurface.
+  // faceSized=false → backbuffer viewport. faceSized=true → face square.
   void bindNativeCaptureTarget(IDirect3DDevice9* device, bool faceSizedViewport);
-  bool nativeCaptureMmeViewportSize(int& outW, int& outH) const;
+  // Rewrite a window-sized SetViewport to the capture face so ray-mmd fills the
+  // square RT. Smaller effect/shadow viewports are left alone.
+  bool expandNativeCaptureViewport(D3DVIEWPORT9& vp) const;
   // Observed in MMD's native sprite producer on the D3D thread. This is the
   // authoritative app instance used by its recorder/reset routines.
   void onMmdAppObserved(void* app);

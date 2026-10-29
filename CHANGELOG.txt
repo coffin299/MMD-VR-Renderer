@@ -10,8 +10,12 @@ GitHub Release Full Changelog → this file on the release tag.
 --------------------------------------------------------------------------------
 
 ### 修正 / Fixed
-- JA: **録画終了／キャンセル後に ray-mmd が少し破綻する**: キャプチャ解除時にウィンドウ解像度で PostDeviceResetし、エンコード前に gate/RT を戻す
-  EN: **ray-mmd looks slightly broken after record end/cancel**: PostDeviceReset at window size on capture teardown; restore gate/RT before encode
+- JA: **録画中の ray-mmd が細い帯になる**: ウィンドウ解像度のビューポートを面サイズへ広げ、GetViewport の偽装をやめた。面ごとに捨てていたフレームと余分な再描画も削減
+  EN: **ray-mmd renders as thin bands during capture**: expand the window viewport to the face size and stop lying about GetViewport; drop the discarded frame and extra repaints per face
+- JA: **エンコ後の再録画でログなしクラッシュ**: 解除時の PostDeviceReset を廃止。ゲート/RT はソフト復帰＋ビューポート微調整、エンコード前に戻す
+  EN: **Silent crash on re-record after encode**: drop PostDeviceReset on teardown; soft-restore gate/RT with a viewport nudge, before encode
+- JA: **録画終了／キャンセル後に ray-mmd が少し破綻する**: キャプチャ解除をエンコード前に行い、SasRefreshViewport が RT を作り直すようビューポートを 2px ずらす
+  EN: **ray-mmd slightly broken after record end/cancel**: tear down capture before encode; nudge viewport 2px so SasRefreshViewport recreates RTs
 
 ### 追加 / Added
 - JA: **AV1 エンコード**（av1_nvenc / QSV / AMF / libsvtav1）。不可時は HEVC → H.264 へ自動フォールバック
