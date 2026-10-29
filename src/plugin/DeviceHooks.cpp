@@ -26,6 +26,8 @@ using BeginScene_t = HRESULT (WINAPI*)(IDirect3DDevice9*);
 using DrawPrimitive_t = HRESULT (WINAPI*)(IDirect3DDevice9*, D3DPRIMITIVETYPE, UINT, UINT);
 using DrawIndexedPrimitive_t = HRESULT (WINAPI*)(IDirect3DDevice9*, D3DPRIMITIVETYPE, INT, UINT, UINT, UINT, UINT);
 using MmdDrawLocalGizmo_t = void (*)(void*, void*);
+using MmdDrawText_t = void (*)(void*, const char*, void*, uintptr_t, uintptr_t,
+                                uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t);
 
 static CreateDevice_t g_CreateDevice = nullptr;
 static Present_t g_Present = nullptr;
@@ -39,8 +41,10 @@ static BeginScene_t g_BeginScene = nullptr;
 static DrawPrimitive_t g_DrawPrimitive = nullptr;
 static DrawIndexedPrimitive_t g_DrawIndexedPrimitive = nullptr;
 static MmdDrawLocalGizmo_t g_MmdDrawLocalGizmo = nullptr;
+static MmdDrawText_t g_MmdDrawText = nullptr;
 static bool g_hooksInstalled = false;
 static bool g_mmdGizmoHookInstalled = false;
+static bool g_mmdGizmoTextHookInstalled = false;
 static int g_presentDepth = 0;
 
 // VR face capture: rewrite main-camera VIEW/PROJ for the whole Present cycle.
@@ -56,6 +60,12 @@ constexpr uintptr_t kMmdLocalGizmoCallerRva = 0x2278E;
 constexpr unsigned char kMmdLocalGizmoSig[] = {
     0x48, 0x89, 0x5C, 0x24, 0x18, 0x55, 0x56, 0x57,
     0x41, 0x54, 0x41, 0x55, 0x48, 0x83, 0xEC, 0x80};
+// MMD 9.32 x64 text helper. The Local XYZ control reaches it with "local"
+// and the six single-character X/Y/Z labels seen in the capture.
+constexpr uintptr_t kMmdDrawTextRva = 0x26950;
+constexpr unsigned char kMmdDrawTextSig[] = {
+    0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x6C,
+    0x24, 0x18, 0x48, 0x89, 0x74, 0x24, 0x20, 0x57};
 
 void SetTransformOverrideEnabled(bool on) {
   g_transformOverride.store(on, std::memory_order_release);
@@ -76,6 +86,23 @@ static void Hook_MmdDrawLocalGizmo(void* context, void* canvas) {
       returnAddress == mmdBase + kMmdLocalGizmoCallerRva)
     return;
   g_MmdDrawLocalGizmo(context, canvas);
+}
+
+static bool isMmdLocalGizmoLabel(const char* text) {
+  if (!text) return false;
+  if ((text[0] == 'X' || text[0] == 'Y' || text[0] == 'Z') && text[1] == '\0')
+    return true;
+  return std::strcmp(text, "local") == 0;
+}
+
+static void Hook_MmdDrawText(void* context, const char* text, void* font,
+                             uintptr_t style, uintptr_t arg5, uintptr_t arg6,
+                             uintptr_t arg7, uintptr_t arg8, uintptr_t arg9,
+                             uintptr_t arg10) {
+  if (g_suppressMmdLocalGizmo.load(std::memory_order_acquire) &&
+      isMmdLocalGizmoLabel(text))
+    return;
+  g_MmdDrawText(context, text, font, style, arg5, arg6, arg7, arg8, arg9, arg10);
 }
 
 static void tryInstallMmdLocalGizmoHook() {
@@ -101,6 +128,30 @@ static void tryInstallMmdLocalGizmoHook() {
   g_mmdGizmoHookInstalled = true;
   Diagnostics::instance().info(
       "Hooked MMD Local XYZ panel leaf draw (skip while capture armed)");
+}
+
+static void tryInstallMmdLocalGizmoTextHook() {
+  if (g_mmdGizmoTextHookInstalled) return;
+  HMODULE mmd = GetModuleHandleW(nullptr);
+  if (!mmd) return;
+  auto* target = reinterpret_cast<unsigned char*>(
+      reinterpret_cast<uintptr_t>(mmd) + kMmdDrawTextRva);
+  if (std::memcmp(target, kMmdDrawTextSig, sizeof(kMmdDrawTextSig)) != 0) {
+    Diagnostics::instance().warn(
+        "MMD Local XYZ text hook skipped (signature mismatch; pixel cleanup only)");
+    g_mmdGizmoTextHookInstalled = true;
+    return;
+  }
+  if (MH_CreateHook(target, &Hook_MmdDrawText,
+                    reinterpret_cast<LPVOID*>(&g_MmdDrawText)) != MH_OK ||
+      MH_EnableHook(target) != MH_OK) {
+    Diagnostics::instance().warn("MMD Local XYZ text MinHook install failed");
+    g_mmdGizmoTextHookInstalled = true;
+    return;
+  }
+  g_mmdGizmoTextHookInstalled = true;
+  Diagnostics::instance().info(
+      "Hooked MMD Local XYZ text draw (skip local/X/Y/Z while capture armed)");
 }
 
 static void* vtable_slot(void* obj, size_t index) {
@@ -238,6 +289,7 @@ void HookDirect3D9(IDirect3D9* d3d) {
   once = true;
   MH_Initialize();
   tryInstallMmdLocalGizmoHook();
+  tryInstallMmdLocalGizmoTextHook();
   void* pCreate = vtable_slot(d3d, 16);
   MH_CreateHook(pCreate, &Hook_CreateDevice, (LPVOID*)&g_CreateDevice);
   MH_EnableHook(pCreate);

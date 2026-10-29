@@ -94,3 +94,9 @@ for c in callers[:5]:
         print(f"0x{insn.address:x}:\t{insn.mnemonic}\t{insn.op_str}{mark}")
         if insn.address > c + 0x20:
             break
+
+for target in (0x140026950, 0x1400264E0):
+    off = va_to_off(target)
+    print(f"\n=== signature {hex(target)} === {data[off:off + 24].hex()}")
+    for insn in md.disasm(data[off:off + 0x60], target):
+        print(f"0x{insn.address:x}:\t{insn.mnemonic}\t{insn.op_str}")

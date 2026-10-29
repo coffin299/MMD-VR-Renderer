@@ -40,8 +40,8 @@ GitHub Release Full Changelog → this file on the release tag.
 ### 修正 / Fixed
 - JA: **8K の最初の面で Present 待機が10秒で失敗する**: 8192² は最大60秒、4K級は最大30秒まで MMD/MME の高解像度描画完了を待機
   EN: **First 8K face timed out after 10 seconds waiting for Present**: allow up to 60 seconds for 8192² and 30 seconds for 4K-class MMD/MME rendering
-- JA: **右下の Local XYZ 操作ギズモがキャプチャに残る**: MMD 9.32 のUI本体ではなく、Local XYZ パネル専用の描画リーフだけをキャプチャ中にスキップ（画素マスクは保険）
-  EN: **Lower-right Local XYZ gizmo still in captures**: skip only MMD 9.32's Local XYZ panel draw leaf while capture is armed (pixel mask kept as fallback)
+- JA: **右下の Local XYZ 操作ギズモがキャプチャに残る**: MMD 9.32 のUI本体を止めず、パネル描画リーフと `local`／6個の `X/Y/Z` テキスト描画だけをキャプチャ中にスキップ（画素マスクは保険）
+  EN: **Lower-right Local XYZ gizmo still in captures**: keep MMD UI running; skip only the panel draw leaf and `local`/six `X/Y/Z` text draws while capture is armed (pixel mask kept as fallback)
 - JA: **8Kなのにぼやける／UI混入／右目欠け**: ray-mmd の HDR カラー面ではなく R32F の効果／深度面を取得して低解像度フォールバックになっていた。完成済みカラーRTを HDR 形式のまま読み出し、残る Local XYZ 操作ギズモを除去。右目が大きく壊れた場合は再キャプチャし、直らなければモノ化せずフレームを拒否
   EN: **Soft 8K / UI leak / broken right eye**: captured ray-mmd R32F effect/depth targets instead of completed HDR color; read back completed HDR color, remove the remaining Local XYZ gizmo, and recapture a damaged right eye instead of converting to mono
 - JA: **8Kなのにぼやける**: ウィンドウ(~772²)を拡大していた。MMD「出力サイズ」を面解像度(最大8192)に設定して実キャプチャ
