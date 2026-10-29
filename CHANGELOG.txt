@@ -36,14 +36,20 @@ GitHub Release Full Changelog → this file on the release tag.
   EN: 8K storage warnings in the resolution combo, size line, and notes (JA+EN)
 
 ### 修正 / Fixed
+- JA: **8Kなのにぼやける**: ウィンドウ(~772²)を拡大していた。MMD「出力サイズ」を面解像度(最大8192)に設定して実キャプチャ
+  EN: **Soft “8K” output**: was upscaling the ~772² window; now sets MMD output size to face res (cap 8192) for real capture
 - JA: **8K ステレオ MP4 がディスク満杯で落ち、H.264 に見えてしまう**: 空き不足を事前検知／再試行停止し、巨大解像度でも HEVC NVENC→libx265 を維持
   EN: **8K stereo MP4 dies on full disk / looks like H.264**: preflight free-space check, stop retries on ENOSPC, keep HEVC NVENC→libx265 for huge frames
 - JA: **CI の unit test が出力なしで exit 1**: 永続 Parallel プールの joinable スレッドが静的破棄で `std::terminate` していた
   EN: **CI unit tests exit 1 with no output**: joinable Parallel pool threads called `std::terminate` on static teardown
 
 ### 変更 / Changed
-- JA: 面解像度の注記に VRAM（面RT）＋キャプチャ時の RAM 消費を明記。最適値は16GB級→7680／8GB級→4096
-  EN: Face-res note states VRAM (face RTs) + RAM on capture; autofill 7680 on 16GB-class / 4096 on 8GB-class
+- JA: **キャプチャ高速化**: 面ごと Sleep/二重Present/ログを削減し、左目投影と右目キャプチャを重ねる
+  EN: **Faster capture**: cut per-face Sleep/double-Present/logging; overlap left projection with right-eye capture
+- JA: 面解像度の上限・最適値を **8192**（VRAM16GB級）／8GB級は4096のまま
+  EN: Face-size cap/autofill **8192** on 16GB-class VRAM; 8GB-class stays 4096
+- JA: 面解像度の注記に VRAM（面RT）＋キャプチャ時の RAM 消費を明記
+  EN: Face-res note states VRAM (face RTs) + RAM on capture
 - JA: 高画質モードの投影・PNG 書き込み・ステレオ左右の重ね処理を高速化（見た目はロスレス維持）
   EN: Faster High-quality projection, PNG write, and stereo overlap (still lossless visually)
 - JA: キャプチャ用 VRAM: ステージ RT は面ごとに解放、readback プールはフレーム間で再利用

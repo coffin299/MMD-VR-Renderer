@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <future>
 #include <string>
 #include <thread>
 #include <system_error>
@@ -461,14 +462,9 @@ bool RenderController::processAnimationFrame(int frameIndex) {
   };
 
   ImageBuffer composed;
-  // Stereo High: project left equirect on a worker while capturing right-eye
-  // faces — bilinear 8K compose often rivals several MMD presents.
+  // Stereo: compose left equirect on a CPU worker while capturing right-eye
+  // faces (Present is D3D-only; compose is pure CPU on owned ImageBuffers).
   if (s.cubemapFaces && s.stereoMode == StereoMode::Stereo) {
-    // Never project the left eye on a worker while the right eye still drives
-    // MMD Present. Overlap looked fine on free-RAM math, but WER shows
-    // c0000005 inside our d3d9.dll mid right-eye faces every time (e.g. face
-    // 7680 jobs dying after ~7 faces with no ERROR line). Parallel CPU
-    // equirect + live D3D9/MME is not safe on this stack.
     std::array<ImageBuffer, 6> facesL{};
     if (!captureCubemapEye(true, facesL)) {
       restoreSceneCamera();
@@ -477,19 +473,23 @@ bool RenderController::processAnimationFrame(int frameIndex) {
       return false;
     }
 
-    ImageBuffer left, right;
     RenderSettings mono = s;
     mono.stereoMode = StereoMode::Mono;
     {
       std::lock_guard<std::mutex> lock(mu_);
-      progress_.stage = L"projecting";
+      progress_.stage = L"projecting+capture";
     }
     if (progressCb_) progressCb_(progress());
-    left = composeFromFaces(facesL, nullptr, mono);
-    facesL = {};
+
+    auto leftFut = std::async(std::launch::async, [faces = std::move(facesL), mono]() mutable {
+      ImageBuffer left = composeFromFaces(faces, nullptr, mono);
+      faces = {};
+      return left;
+    });
 
     std::array<ImageBuffer, 6> facesR{};
     if (!captureCubemapEye(false, facesR)) {
+      leftFut.wait();
       restoreSceneCamera();
       camera_.restore(saved);
       camera_.endOverride();
@@ -500,13 +500,8 @@ bool RenderController::processAnimationFrame(int frameIndex) {
     camera_.endOverride();
     camera_.restore(saved);
 
-    {
-      std::lock_guard<std::mutex> lock(mu_);
-      progress_.stage = L"projecting";
-    }
-    if (progressCb_) progressCb_(progress());
-
-    right = composeFromFaces(facesR, nullptr, mono);
+    ImageBuffer left = leftFut.get();
+    ImageBuffer right = composeFromFaces(facesR, nullptr, mono);
     facesR = {};
 
     if (left.empty() || right.empty()) {
@@ -606,10 +601,13 @@ bool RenderController::start(ProgressCallback cb) {
       (s.writeQueueMax > 0 ? " (user cap)" : " (auto RAM cap)") +
       " frameRGBA≈" + std::to_string(frameBytes / (1024ull * 1024ull)) + "MB" +
       " freeRAM≈" + std::to_string(availablePhysMb()) + "MB");
-  if (s.cubemapFaces && s.faceSize > 4096) {
+  if (s.cubemapFaces && s.faceSize > 8192) {
     Diagnostics::instance().warn(
-        "faceSize > 4096 is very heavy on MMD/MME and has caused long-job crashes; "
-        "prefer 2048–4096 unless you have verified stability");
+        "faceSize > 8192 exceeds common D3D9 MaxTexture; clamped paths may reject it");
+  } else if (s.cubemapFaces && s.faceSize >= 6144) {
+    Diagnostics::instance().info(
+        "faceSize>=" + std::to_string(s.faceSize) +
+        " is GPU-heavy (VRAM/MME); OK if the card stays stable");
   }
   if (frameBytes >= 400ull * 1024ull * 1024ull) {
     Diagnostics::instance().warn(

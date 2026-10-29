@@ -66,6 +66,8 @@ private:
   MmdCameraUiState nativeCameraBase_{};
   bool nativeCameraApplied_ = false;
   bool mmdOutputSizeConfigured_ = false;
+  // Actual MMD「出力サイズ」we applied (may be capped below UI faceSize).
+  int mmdOutputFaceSize_ = 0;
   IDirect3DDevice9* device_ = nullptr;
   HWND mmdHwnd_ = nullptr;
 

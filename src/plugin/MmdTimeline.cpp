@@ -309,8 +309,9 @@ bool MmdTimeline::applyCamera(const MmdCameraUiState& state) {
     InvalidateRect(mmdMain_, nullptr, FALSE);
     PostMessageW(mmdMain_, WM_PAINT, 0, 0);
   }
-  // Let MMD consume every changed input before Present is requested.
-  Sleep(45);
+  // Let MMD consume edit notifications before Present. Was 45ms×faces/frame
+  // (~0.5s/stereo frame idle); 8ms is enough once skipCaptures is 0.
+  Sleep(8);
   return true;
 }
 
@@ -596,24 +597,11 @@ bool MmdTimeline::applyCameraFace(
   state.z = base.z + baseOrbit.z - faceOrbit.z + eyeOz;
   if (!applyCamera(state)) return false;
 
+  // Per-face readback logs were drowning the job log (10×/frame × thousands).
+  // Spot-check only when readback fails.
   MmdCameraUiState applied;
-  if (readCamera(applied)) {
-    char msg[384];
-    std::snprintf(
-        msg, sizeof(msg),
-        "MmdTimeline: native face=%d requested center=(%.3f,%.3f,%.3f) "
-        "stereo=(%.3f,%.3f,%.3f) rot=(%.3f,%.3f,%.3f), "
-        "readback center=(%.3f,%.3f,%.3f) rot=(%.3f,%.3f,%.3f)",
-        static_cast<int>(desired.cubeFace),
-        state.x, state.y, state.z,
-        eyeOx, eyeOy, eyeOz,
-        state.rotX, state.rotY, state.rotZ,
-        applied.x, applied.y, applied.z,
-        applied.rotX, applied.rotY, applied.rotZ);
-    Diagnostics::instance().info(msg);
-  } else {
+  if (!readCamera(applied))
     Diagnostics::instance().warn("MmdTimeline: cannot read back applied native camera face");
-  }
   return true;
 }
 
@@ -653,7 +641,7 @@ bool MmdTimeline::seekFrame(int frame) {
   }
 
   // Brief yield so bones / MME can evaluate before the next Present capture.
-  Sleep(30);
+  Sleep(8);
 
   int got = readFrame();
   if (got >= 0 && got != frame) {
@@ -661,7 +649,7 @@ bool MmdTimeline::seekFrame(int frame) {
     std::snprintf(msg, sizeof(msg),
                   "MmdTimeline: seek requested %d but UI shows %d (continuing)", frame, got);
     Diagnostics::instance().warn(msg);
-  } else {
+  } else if ((frame % 60) == 0) {
     char msg[96];
     std::snprintf(msg, sizeof(msg), "MmdTimeline: seek -> %d (readback=%d)", frame, got);
     Diagnostics::instance().info(msg);

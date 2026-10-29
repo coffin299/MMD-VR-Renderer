@@ -208,11 +208,13 @@ void PluginHost::stagePreOverlaySource(
   if (FAILED(source->GetDesc(&desc)) || desc.Width == 0 || desc.Height == 0)
     return;
 
-  // Prefer MMD output-size square (faceSize) when cubemap is configured. Matching
-  // only the window backbuffer caused 7680 jobs to silently stage 1920×1080.
+  // Prefer the square we set via MMD「出力サイズ」(mmdOutputFaceSize_). Matching
+  // only the window backbuffer caused 8K jobs to silently stage ~772².
   const auto settings = controller_.settings();
   const int faceTarget =
-      (settings.cubemapFaces && mmdOutputSizeConfigured_) ? settings.resolvedFaceSize() : 0;
+      (settings.cubemapFaces && mmdOutputSizeConfigured_ && mmdOutputFaceSize_ > 0)
+          ? mmdOutputFaceSize_
+          : 0;
 
   auto scoreCandidate = [&](int w, int h) -> int {
     if (faceTarget > 0) {
@@ -340,6 +342,7 @@ void PluginHost::releaseRenderSession(const char* reason) {
   if (!isDeviceReset && mmdOutputSizeConfigured_) {
     timeline_.restoreOutputSize();
     mmdOutputSizeConfigured_ = false;
+    mmdOutputFaceSize_ = 0;
   }
   if (!isDeviceReset) timeline_.restoreScreenCaptureMode();
   char buf[160];
@@ -596,14 +599,31 @@ bool PluginHost::seekAnimationFrame(int frameIndex) {
   }
   const auto settings = controller_.settings();
   if (settings.cubemapFaces && !mmdOutputSizeConfigured_) {
-    // Skip MMD「出力サイズ」changes for now. Setting 4096/7680 left the window
-    // backbuffer at 1920×1080 (no Pre-overlay face RT ever staged) while
-    // thrashing MME/ray-mmd targets. Capture the live viewport until a real
-    // face-sized RT path works.
-    mmdOutputSizeConfigured_ = true;
+    // Drive MMD「出力サイズ」so cubemap faces are real high-res RTs — not the
+    // ~772² window viewport upscaled into an 8K equirect (soft mush).
+    // Cap at 8192 (common D3D9 MaxTexture). GPU-heavy but intentional.
+    int face = settings.resolvedFaceSize();
+    if (face > 8192) face = 8192;
+    if (face < 512) face = 512;
     refreshBackbufferSize();
-    Diagnostics::instance().info(
-        "seekAnimationFrame: keeping MMD output size; capturing window viewport");
+    char attempt[128];
+    std::snprintf(attempt, sizeof(attempt),
+                  "seekAnimationFrame: setting MMD output size %dx%d for cubemap faces",
+                  face, face);
+    Diagnostics::instance().info(attempt);
+    if (timeline_.setOutputSize(face, face)) {
+      mmdOutputSizeConfigured_ = true;
+      mmdOutputFaceSize_ = face;
+      refreshBackbufferSize();
+      Diagnostics::instance().info(
+          "seekAnimationFrame: MMD output size OK — expect face-sized captures");
+    } else {
+      mmdOutputSizeConfigured_ = false;
+      mmdOutputFaceSize_ = 0;
+      Diagnostics::instance().warn(
+          "seekAnimationFrame: setOutputSize failed; falling back to window viewport "
+          "(equirect will look soft at 8K)");
+    }
   }
   if (!timeline_.frameEdit() || !IsWindow(timeline_.frameEdit())) {
     if (!timeline_.bind(mmdHwnd_)) return false;
@@ -723,7 +743,9 @@ bool PluginHost::renderView(const CameraState& cam, ImageBuffer& out) {
     std::lock_guard<std::mutex> lock(redrawMu_);
     captureReady_ = false;
     wantCapture_ = true;
-    skipCaptures_ = 1;
+    // Native UI camera is applied + short Sleep before this wait; the next
+    // Present is already the face we want. skip=1 doubled every face Present.
+    skipCaptures_ = 0;
     pendingCam_ = cam;
     preOverlayCandidateLogged_ = false;
   }
@@ -758,23 +780,18 @@ bool PluginHost::renderView(const CameraState& cam, ImageBuffer& out) {
     skipCaptures_ = 0;
     return false;
   }
-  char armed[128];
-  std::snprintf(armed, sizeof(armed), "renderView: native face=%d halfIpd=%.3f armed (skip=1)",
-                static_cast<int>(cam.cubeFace), cam.nativeEyeOffsetX);
-  Diagnostics::instance().info(armed);
-
   std::unique_lock<std::mutex> lock(redrawMu_);
   bool ok = false;
-  for (int i = 0; i < 150; ++i) {
+  for (int i = 0; i < 200; ++i) {
     if (controller_.isCancelled()) break;
-    // Keep nudging MMD so a fully evaluated post-camera-change frame arrives.
-    if (mmdHwnd_ && (i % 2) == 0) {
+    // Nudge occasionally — flooding WM_PAINT re-enters Present under MME.
+    if (mmdHwnd_ && (i % 4) == 0) {
       lock.unlock();
       InvalidateRect(mmdHwnd_, nullptr, FALSE);
       PostMessageW(mmdHwnd_, WM_PAINT, 0, 0);
       lock.lock();
     }
-    ok = redrawCv_.wait_for(lock, std::chrono::milliseconds(100), [&]{ return captureReady_; });
+    ok = redrawCv_.wait_for(lock, std::chrono::milliseconds(50), [&]{ return captureReady_; });
     if (ok) break;
   }
 
@@ -789,9 +806,15 @@ bool PluginHost::renderView(const CameraState& cam, ImageBuffer& out) {
     if (out.empty()) {
       Diagnostics::instance().info("renderView: empty capture");
     } else {
-      char msg[96];
-      std::snprintf(msg, sizeof(msg), "renderView: face ok %dx%d", out.width, out.height);
-      Diagnostics::instance().info(msg);
+      // Log size only when it changes (avoids 10×/frame log spam).
+      static int s_lastW = 0, s_lastH = 0;
+      if (out.width != s_lastW || out.height != s_lastH) {
+        s_lastW = out.width;
+        s_lastH = out.height;
+        char msg[96];
+        std::snprintf(msg, sizeof(msg), "renderView: face ok %dx%d", out.width, out.height);
+        Diagnostics::instance().info(msg);
+      }
     }
     return !out.empty();
   }

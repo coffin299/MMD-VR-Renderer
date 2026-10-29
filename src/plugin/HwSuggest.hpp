@@ -85,8 +85,8 @@ inline void queryGpuMemory(unsigned long long& totalMb, unsigned long long& free
 }
 
 inline void applyVramCap(HwSuggest& out) {
-  // Face autofill by installed VRAM (observed ~6–7GB use even at face 7680):
-  //   ≥16GB → 7680,  ~8–15GB → 4096,  smaller → tighter caps.
+  // Face autofill by installed VRAM (16GB-class can push MaxTexture 8192):
+  //   ≥16GB → 8192,  ~8–15GB → 4096,  smaller → tighter caps.
   const unsigned long long total = out.vramTotalMb;
   const unsigned long long freeMb = out.vramFreeMb;
   if (total == 0 && freeMb == 0) return;
@@ -97,10 +97,10 @@ inline void applyVramCap(HwSuggest& out) {
     out.quality = q;
   };
 
-  // 16GB-class: allow max face for 8K.
+  // 16GB-class: allow MaxTexture-class face for 8K.
   if (total >= 15360) {
     if (out.resolution == ResolutionPreset::Res8K || out.faceSize >= 4096) {
-      if (out.faceSize < 7680) out.faceSize = 7680;
+      if (out.faceSize < 8192) out.faceSize = 8192;
       out.quality = QualityPreset::High;
     }
     if (freeMb > 0 && freeMb < 2048)
@@ -172,8 +172,8 @@ inline HwSuggest suggestFromThisPc() {
   if (out.ramMb >= 48 && out.logicalCores >= 12) {
     out.quality = QualityPreset::High;
     out.resolution = ResolutionPreset::Res8K;
-    // Face from VRAM: 16GB→7680, 8GB-class→4096 (applyVramCap refines).
-    out.faceSize = (out.vramTotalMb >= 15360) ? 7680 : 4096;
+    // Face from VRAM: 16GB→8192, 8GB-class→4096 (applyVramCap refines).
+    out.faceSize = (out.vramTotalMb >= 15360) ? 8192 : 4096;
     out.writeThreads = (std::min)(6, (std::max)(2, out.logicalCores / 4));
     out.writeQueueMax = (out.ramMb >= 48) ? 6 : 4;
     tier = tr.hwSuggestHigh;
@@ -181,7 +181,7 @@ inline HwSuggest suggestFromThisPc() {
     // Strong GPU even if RAM tier is mid-high.
     out.quality = QualityPreset::High;
     out.resolution = ResolutionPreset::Res8K;
-    out.faceSize = 7680;
+    out.faceSize = 8192;
     out.writeThreads = (std::min)(6, (std::max)(2, out.logicalCores / 4));
     out.writeQueueMax = (out.ramMb >= 48) ? 6 : 4;
     tier = tr.hwSuggestHigh;

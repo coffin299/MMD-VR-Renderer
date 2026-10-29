@@ -155,8 +155,26 @@ bool ImageSequenceWriter::writeJpeg(ImageBuffer& image, const std::wstring& path
 }
 
 bool ImageSequenceWriter::writeFrame(ImageBuffer& image, int frameIndex, const wchar_t* suffix) const {
-  const bool compact = preferCompactJpeg(image.width, image.height) &&
-                       !(suffix && *suffix); // debug dumps stay PNG
+  // Debug dumps always PNG. For the main sequence: if this folder already has
+  // frame_*.png (resume of an older job), keep PNG so FFmpeg sees one pattern.
+  // Otherwise large frames use JPEG q92 (~50MB target).
+  const bool debugDump = suffix && *suffix;
+  bool compact = !debugDump && preferCompactJpeg(image.width, image.height);
+  if (compact) {
+    std::error_code ec;
+    for (auto& ent : fs::directory_iterator(outputDir_, ec)) {
+      if (!ent.is_regular_file(ec)) continue;
+      auto name = ent.path().filename().wstring();
+      if (name.rfind(L"frame_", 0) != 0) continue;
+      auto ext = ent.path().extension().wstring();
+      if (_wcsicmp(ext.c_str(), L".png") == 0) {
+        compact = false; // continue existing PNG job
+        break;
+      }
+      if (_wcsicmp(ext.c_str(), L".jpg") == 0 || _wcsicmp(ext.c_str(), L".jpeg") == 0)
+        break; // already a JPEG job
+    }
+  }
   if (compact) {
     const auto path = framePath(frameIndex, image.width, image.height, suffix);
     static bool logged = false;
@@ -206,8 +224,9 @@ std::wstring detectFrameSequencePattern(const std::wstring& sequenceDir) {
       if (anyJpg && anyPng) break;
     }
   }
-  if (anyJpg) return L"frame_%06d.jpg";
+  // Prefer PNG when mixed/ambiguous so resumed legacy jobs stay FFmpeg-friendly.
   if (anyPng) return L"frame_%06d.png";
+  if (anyJpg) return L"frame_%06d.jpg";
   return L"frame_%06d.png";
 }
 
