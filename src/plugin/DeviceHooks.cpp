@@ -222,6 +222,11 @@ static HRESULT WINAPI Hook_GetViewport(IDirect3DDevice9* self, D3DVIEWPORT9* vp)
 }
 
 static HRESULT WINAPI Hook_BeginScene(IDirect3DDevice9* self) {
+  // MME snapshots the viewport, view/projection, and main RT inside BeginScene.
+  // Binding the face afterwards left ray's lighting on the window and the
+  // cubemap on the pre-light buffer.
+  if (PluginHost::instance().nativeCaptureSurfaceActive())
+    PluginHost::instance().prepareNativeCaptureBeforeBegin(self);
   HRESULT hr = g_BeginScene(self);
   if (SUCCEEDED(hr)) {
     if (PluginHost::instance().nativeCaptureSurfaceActive())

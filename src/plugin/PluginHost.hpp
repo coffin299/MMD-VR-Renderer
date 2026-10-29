@@ -46,6 +46,9 @@ public:
   // can be staged before the next pass begins.
   void onBeforeSetRenderTarget(IDirect3DDevice9* device, DWORD index);
   void onBeginScene(IDirect3DDevice9* device);
+  // Bind the face RT, camera, and 90° view before MME's BeginScene snapshot.
+  // Ray composites lighting onto whatever target/camera that snapshot recorded.
+  void prepareNativeCaptureBeforeBegin(IDirect3DDevice9* device);
   void onSetRenderTarget(IDirect3DSurface9* rt);
   void onMainPassDraw();
   // Records MMD's live main-camera pair while no cubemap override is active.

@@ -794,9 +794,9 @@ void PluginHost::stagePreOverlaySource(
 
   if (capture_.hasStagedSurface()) {
     int sw = 0, sh = 0;
-    // A later pass at the same size is ray's lit/tonemapped color. The first
-    // face-sized target is the unlit G-buffer and reads as a dark frame.
-    if (capture_.stagedSize(sw, sh) && scoreCandidate(sw, sh) > score)
+    // Keep the first face-sized color. Later equal-size targets are ray
+    // intermediates; copying each one also burned a full 4096 readback per pass.
+    if (capture_.stagedSize(sw, sh) && scoreCandidate(sw, sh) >= score)
       return;
   }
 
@@ -810,7 +810,7 @@ void PluginHost::stagePreOverlaySource(
   bool logCandidate = false;
   {
     std::lock_guard<std::mutex> lock(redrawMu_);
-    if (!preOverlayCandidateLogged_ || score >= 100000) {
+    if (!preOverlayCandidateLogged_) {
       preOverlayCandidateLogged_ = true;
       logCandidate = true;
     }
@@ -974,6 +974,10 @@ void PluginHost::onSetRenderTarget(IDirect3DSurface9* rt) {
     onMainRt_ = true;
     return;
   }
+  if (nativeCaptureSurfaceActive() && rt == nativeCaptureRestore_.ownedCapture) {
+    onMainRt_ = true;
+    return;
+  }
   const int tolW = bbW_ / 10 + 8;
   const int tolH = bbH_ / 10 + 8;
   onMainRt_ = (std::abs((int)d.Width - bbW_) <= tolW) && (std::abs((int)d.Height - bbH_) <= tolH);
@@ -993,6 +997,84 @@ void PluginHost::onBeforeSetRenderTarget(IDirect3DDevice9* device, DWORD index) 
     stagePreOverlaySource(device, outgoing, "SetRenderTarget(outgoing)");
     outgoing->Release();
   }
+}
+
+void PluginHost::prepareNativeCaptureBeforeBegin(IDirect3DDevice9* device) {
+  if (!device || !wantCapture_ || !nativeCaptureSurfaceActive()) return;
+  if (captureDeferPresents_.load(std::memory_order_acquire)) return;
+  if (!latchedCubemapCamera_.valid) {
+    bindNativeCaptureTarget(device, true);
+    return;
+  }
+
+  writeLatchedCubemapCamera(mmdApp_.load(std::memory_order_acquire),
+                            latchedCubemapCamera_);
+  bindNativeCaptureTarget(device, true);
+
+  const MmdCameraUiState& s = latchedCubemapCamera_;
+  constexpr double kPi = 3.14159265358979323846;
+  const double pitch = s.rotX * kPi / 180.0;
+  const double yaw = s.rotY * kPi / 180.0;
+  const double roll = s.rotZ * kPi / 180.0;
+  double ox = 0.0, oy = 0.0, oz = -s.distance;
+  const double cx = std::cos(pitch), sx = std::sin(pitch);
+  oy = oy * cx + oz * sx;
+  oz = -0.0 * sx + oz * cx;
+  const double cy = std::cos(yaw), sy = std::sin(yaw);
+  {
+    const double nx = ox * cy + oz * sy;
+    oz = -ox * sy + oz * cy;
+    ox = nx;
+  }
+  const double cz = std::cos(roll), sz = std::sin(roll);
+  {
+    const double nx = ox * cz + oy * sz;
+    oy = -ox * sz + oy * cz;
+    ox = nx;
+  }
+
+  const Vec3 eye{static_cast<float>(s.x + ox), static_cast<float>(s.y + oy),
+                 static_cast<float>(s.z + oz)};
+  const Vec3 target{static_cast<float>(s.x), static_cast<float>(s.y),
+                    static_cast<float>(s.z)};
+  Vec3 up{0.f, 1.f, 0.f};
+  const Vec3 forward = normalize(sub(target, eye));
+  if (std::fabs(dot(forward, up)) > 0.95f)
+    up = {0.f, 0.f, 1.f};
+
+  float zNear = 0.1f;
+  float zFar = 10000.f;
+  D3DMATRIX currentProj{};
+  if (SUCCEEDED(device->GetTransform(D3DTS_PROJECTION, &currentProj))) {
+    Mat4 current{};
+    std::memcpy(current.m, currentProj.m, sizeof(current.m));
+    float nearPlane = 0.f, farPlane = 0.f;
+    if (extractPerspectiveNearFar(current, nearPlane, farPlane) &&
+        nearPlane > 0.f && farPlane > nearPlane) {
+      zNear = nearPlane;
+      zFar = farPlane;
+    }
+  }
+
+  CameraState faceCam;
+  faceCam.eye = eye;
+  faceCam.target = target;
+  faceCam.up = up;
+  faceCam.fovYDeg = 90.f;
+  faceCam.aspect = 1.f;
+  faceCam.zNear = zNear;
+  faceCam.zFar = zFar;
+  faceCam.view = lookAtRH(eye, target, up);
+  faceCam.projection = perspectiveRH(90.f, 1.f, zNear, zFar);
+  faceCam.valid = true;
+  controller_.camera().beginOverride(faceCam);
+  SetTransformOverrideEnabled(true);
+
+  D3DMATRIX view{}, proj{};
+  std::memcpy(view.m, faceCam.view.m, sizeof(float) * 16);
+  std::memcpy(proj.m, faceCam.projection.m, sizeof(float) * 16);
+  device->SetTransform(D3DTS_VIEW, &view);
+  device->SetTransform(D3DTS_PROJECTION, &proj);
 }
 
 void PluginHost::onBeginScene(IDirect3DDevice9* device) {
@@ -1189,20 +1271,16 @@ void PluginHost::onBeforePresent(IDirect3DDevice9* device) {
   const bool requireNativeFace =
       nativeCaptureState_.load(std::memory_order_acquire) == 3 &&
       mmdOutputFaceSize_ > 0;
-  if (requireNativeFace && !capture_.hasStagedSurface() &&
-      nativeCaptureRestore_.renderer) {
-    // The recording target belongs to MMD's inner device under MME. Capture
-    // it explicitly here rather than waiting for a proxy SetRenderTarget hook
-    // that may only observe the outer device.
-    auto* nativeSurface = mmdField<IDirect3DSurface9*>(
-        nativeCaptureRestore_.renderer, kRendererCaptureSurface);
-    if (nativeSurface) {
-      D3DSURFACE_DESC nativeDesc{};
-      if (SUCCEEDED(nativeSurface->GetDesc(&nativeDesc)) &&
-          nativeDesc.Width >= static_cast<UINT>(mmdOutputFaceSize_ * 3 / 4) &&
-          nativeDesc.Height >= static_cast<UINT>(mmdOutputFaceSize_ * 3 / 4)) {
-        capture_.stageSurface(nativeSurface, mmdOutputFaceSize_, mmdOutputFaceSize_);
-      }
+  if (requireNativeFace && nativeCaptureRestore_.ownedCapture) {
+    // Ray's post composite lands on the RT that was current at BeginScene.
+    // That is this capture surface; intermediate 4096 passes are not the frame.
+    D3DSURFACE_DESC nativeDesc{};
+    if (SUCCEEDED(nativeCaptureRestore_.ownedCapture->GetDesc(&nativeDesc)) &&
+        nativeDesc.Width >= static_cast<UINT>(mmdOutputFaceSize_ * 3 / 4) &&
+        nativeDesc.Height >= static_cast<UINT>(mmdOutputFaceSize_ * 3 / 4)) {
+      capture_.clearStagedSurface();
+      capture_.stageSurface(nativeCaptureRestore_.ownedCapture,
+                            mmdOutputFaceSize_, mmdOutputFaceSize_);
     }
   }
   bool usedPreOverlay = capture_.hasStagedSurface();
