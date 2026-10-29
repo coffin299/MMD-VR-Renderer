@@ -84,6 +84,7 @@ struct Bundle {
   const wchar_t* progressTitle;
   const wchar_t* progressStatusFmt; // done,total,pct
   const wchar_t* progressPaused;
+  const wchar_t* progressPausedDisk; // auto-pause: output drive nearly full
   const wchar_t* progressFlushingPng;
   const wchar_t* progressEncoding;
   const wchar_t* progressVrMeta;

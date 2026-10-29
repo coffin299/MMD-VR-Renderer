@@ -148,20 +148,23 @@ static std::wstring resolveFramesDir(std::wstring path) {
     path.pop_back();
   if (path.empty()) return {};
   std::error_code ec;
-  auto hasPng = [&](const fs::path& dir) {
+  auto hasFrames = [&](const fs::path& dir) {
     if (!fs::is_directory(dir, ec)) return false;
     for (auto it = fs::directory_iterator(dir, ec); !ec && it != fs::directory_iterator(); ++it) {
       if (!it->is_regular_file(ec)) continue;
       auto name = it->path().filename().wstring();
-      if (name.rfind(L"frame_", 0) == 0 && it->path().extension() == L".png")
+      if (name.rfind(L"frame_", 0) != 0) continue;
+      auto ext = it->path().extension().wstring();
+      if (_wcsicmp(ext.c_str(), L".png") == 0 || _wcsicmp(ext.c_str(), L".jpg") == 0 ||
+          _wcsicmp(ext.c_str(), L".jpeg") == 0)
         return true;
     }
     return false;
   };
   fs::path p(path);
-  if (hasPng(p)) return p.wstring();
-  if (hasPng(p / L"frames")) return (p / L"frames").wstring();
-  if (p.filename() == L"frames" && hasPng(p)) return p.wstring();
+  if (hasFrames(p)) return p.wstring();
+  if (hasFrames(p / L"frames")) return (p / L"frames").wstring();
+  if (p.filename() == L"frames" && hasFrames(p)) return p.wstring();
   return {};
 }
 

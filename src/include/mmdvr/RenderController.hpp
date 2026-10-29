@@ -92,6 +92,9 @@ private:
   std::function<void()> cleanupHandler_;
   JobProgress progress_{};
   void waitIfPaused();
+  // Blocks while paused; auto-pauses when the output volume is nearly full.
+  void waitIfPausedOrLowDisk();
+  void pauseForLowDisk(const std::wstring& outputDir);
   void updateTimingLocked(int completedCount);
 
   std::atomic<bool> running_{false};

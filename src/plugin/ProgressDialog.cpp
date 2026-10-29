@@ -71,7 +71,9 @@ static void applyProgress(HWND hWnd, const JobProgress& p) {
 
   const auto& t = ui::t();
   wchar_t status[256];
-  if (p.paused) {
+  if (p.paused && p.stage == L"paused_disk") {
+    swprintf(status, 256, L"%s", t.progressPausedDisk);
+  } else if (p.paused) {
     swprintf(status, 256, L"%s", t.progressPaused);
   } else if (p.stage == L"flushing_png") {
     swprintf(status, 256, L"%s", t.progressFlushingPng);
@@ -93,7 +95,12 @@ static void applyProgress(HWND hWnd, const JobProgress& p) {
   SetDlgItemTextW(hWnd, IDC_STATUS, status);
 
   wchar_t detail[768];
-  if (p.stage == L"flushing_png") {
+  if (p.paused && p.stage == L"paused_disk") {
+    swprintf(detail, 768, t.progressPostDetailFmt,
+             formatDuration(p.elapsedSec).c_str(),
+             t.progressPausedDisk,
+             p.stageNote.c_str());
+  } else if (p.stage == L"flushing_png") {
     swprintf(detail, 768, t.progressPostDetailFmt,
              formatDuration(p.elapsedSec).c_str(), t.progressFlushingDetail,
              p.stageNote.c_str());

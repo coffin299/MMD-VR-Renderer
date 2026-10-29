@@ -10,6 +10,10 @@ GitHub Release Full Changelog → this file on the release tag.
 --------------------------------------------------------------------------------
 
 ### 追加 / Added
+- JA: **ディスク空き不足でキャプチャを自動一時停止**（残り約2GB未満）。空き確保後に「再開」
+  EN: **Auto-pause capture when the output disk is nearly full** (under ~2 GiB free); Resume after freeing space
+- JA: **大解像度の連番を JPEG q92 に**（ステレオ8Kで約50MB/枚目標）。小さい解像度は PNG 圧縮強化
+  EN: **Large-resolution sequences use JPEG q92** (~50MB/frame target for stereo 8K); smaller jobs keep stronger PNG zlib
 - JA: **「MP4再エンコード」タブ**: 過去ジョブの PNG 連番から MP4 だけ作り直し（エンコード失敗後の再試行用）
   EN: **“Re-encode MP4” tab**: rebuild MP4 from an existing PNG sequence (retry after encode failure)
 - JA: 「このPC向け最適値」が DXGI の空き／搭載 VRAM を見て提案（当面の面サイズ上限は 4096）
@@ -32,6 +36,8 @@ GitHub Release Full Changelog → this file on the release tag.
   EN: 8K storage warnings in the resolution combo, size line, and notes (JA+EN)
 
 ### 修正 / Fixed
+- JA: **8K ステレオ MP4 がディスク満杯で落ち、H.264 に見えてしまう**: 空き不足を事前検知／再試行停止し、巨大解像度でも HEVC NVENC→libx265 を維持
+  EN: **8K stereo MP4 dies on full disk / looks like H.264**: preflight free-space check, stop retries on ENOSPC, keep HEVC NVENC→libx265 for huge frames
 - JA: **CI の unit test が出力なしで exit 1**: 永続 Parallel プールの joinable スレッドが静的破棄で `std::terminate` していた
   EN: **CI unit tests exit 1 with no output**: joinable Parallel pool threads called `std::terminate` on static teardown
 

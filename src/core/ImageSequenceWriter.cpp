@@ -14,6 +14,7 @@
 #include <filesystem>
 #endif
 #include <algorithm>
+#include <cstdio>
 #include <sstream>
 #include <iomanip>
 #include <vector>
@@ -43,7 +44,6 @@ static bool looksOpaqueRgba(const ImageBuffer& image) {
   for (size_t p = 0; p < n; p += step) {
     if (image.rgba[p * 4 + 3] != 255) return false;
   }
-  // Also check a few corners/center.
   const size_t corners[] = {0, n - 1, n / 2,
                             static_cast<size_t>(image.width / 2) +
                                 static_cast<size_t>(image.height / 2) * static_cast<size_t>(image.width)};
@@ -70,6 +70,18 @@ static bool packRgbaToRgbInPlace(ImageBuffer& image) {
   return true;
 }
 
+bool ImageSequenceWriter::preferCompactJpeg(int width, int height) {
+  if (width <= 0 || height <= 0) return false;
+  // ~4K mono and up: lossless PNG balloons (stereo 8K was ~80–120MB/frame).
+  // High-quality JPEG targets ~50MB for stereo 8K SBS.
+  const long long px = static_cast<long long>(width) * static_cast<long long>(height);
+  return px >= 3840ll * 2160ll;
+}
+
+const wchar_t* ImageSequenceWriter::frameExtension(int width, int height) {
+  return preferCompactJpeg(width, height) ? L".jpg" : L".png";
+}
+
 ImageSequenceWriter::ImageSequenceWriter(std::wstring outputDir) : outputDir_(std::move(outputDir)) {}
 
 bool ImageSequenceWriter::ensureDir() const {
@@ -79,10 +91,19 @@ bool ImageSequenceWriter::ensureDir() const {
 }
 
 std::wstring ImageSequenceWriter::framePath(int frameIndex, const wchar_t* suffix) const {
+  // Legacy overload: assume PNG (debug dumps / unknown size).
+  return framePath(frameIndex, 0, 0, suffix);
+}
+
+std::wstring ImageSequenceWriter::framePath(int frameIndex, int width, int height,
+                                           const wchar_t* suffix) const {
   std::wstringstream ss;
   ss << outputDir_ << L"\\frame_" << std::setw(6) << std::setfill(L'0') << frameIndex;
   if (suffix && *suffix) ss << suffix;
-  ss << L".png";
+  if (width > 0 && height > 0)
+    ss << frameExtension(width, height);
+  else
+    ss << L".png";
   return ss.str();
 }
 
@@ -93,17 +114,14 @@ bool ImageSequenceWriter::writePng(ImageBuffer& image, const std::wstring& path)
 
   int comps = 4;
   int stride = image.width * 4;
-  // Opaque VR frames: RGB PNG is lossless vs RGBA and typically 20–40% smaller.
   if (looksOpaqueRgba(image) && packRgbaToRgbInPlace(image)) {
     comps = 3;
     stride = image.width * 3;
   }
 
-  // PNG is lossless at every level — lower zlib level only trades file size
-  // for encode speed. High-quality jobs were bottlenecked more on write than
-  // on visual fidelity here (RGB opaque path already cuts size a lot).
   const size_t px = static_cast<size_t>(image.width) * static_cast<size_t>(image.height);
-  stbi_write_png_compression_level = (px >= 8000ull * 4000ull) ? 5 : 4;
+  // Stronger zlib (stb default is 8). Huge frames use 9 — overnight jobs can afford it.
+  stbi_write_png_compression_level = (px >= 3840ull * 2160ull) ? 9 : 8;
 
   const int ok = stbi_write_png(utf8.c_str(), image.width, image.height, comps,
                                 image.rgba.data(), stride);
@@ -114,8 +132,43 @@ bool ImageSequenceWriter::writePng(ImageBuffer& image, const std::wstring& path)
   return true;
 }
 
+bool ImageSequenceWriter::writeJpeg(ImageBuffer& image, const std::wstring& path, int quality) const {
+  if (image.empty()) return false;
+  ensureDir();
+  if (quality < 50) quality = 50;
+  if (quality > 100) quality = 100;
+
+  int comps = 4;
+  if (looksOpaqueRgba(image) && packRgbaToRgbInPlace(image))
+    comps = 3;
+  else if (image.rgba.size() < static_cast<size_t>(image.width) * image.height * 4)
+    comps = 3;
+
+  std::string utf8 = toUtf8(path);
+  const int ok = stbi_write_jpg(utf8.c_str(), image.width, image.height, comps,
+                                image.rgba.data(), quality);
+  if (!ok) {
+    Diagnostics::instance().error("stbi_write_jpg failed: " + utf8);
+    return false;
+  }
+  return true;
+}
+
 bool ImageSequenceWriter::writeFrame(ImageBuffer& image, int frameIndex, const wchar_t* suffix) const {
-  return writePng(image, framePath(frameIndex, suffix));
+  const bool compact = preferCompactJpeg(image.width, image.height) &&
+                       !(suffix && *suffix); // debug dumps stay PNG
+  if (compact) {
+    const auto path = framePath(frameIndex, image.width, image.height, suffix);
+    static bool logged = false;
+    if (!logged) {
+      logged = true;
+      Diagnostics::instance().info(
+          "Sequence frames: JPEG q" + std::to_string(compactJpegQuality()) +
+          " (compact ~50MB target for large VR). Path example: " + toUtf8(path));
+    }
+    return writeJpeg(image, path, compactJpegQuality());
+  }
+  return writePng(image, framePath(frameIndex, image.width, image.height, suffix));
 }
 
 bool ImageSequenceWriter::writePng(const ImageBuffer& image, const std::wstring& path) const {
@@ -126,6 +179,36 @@ bool ImageSequenceWriter::writePng(const ImageBuffer& image, const std::wstring&
 bool ImageSequenceWriter::writeFrame(const ImageBuffer& image, int frameIndex, const wchar_t* suffix) const {
   ImageBuffer copy = image;
   return writeFrame(copy, frameIndex, suffix);
+}
+
+bool frameSequenceFileExists(const std::wstring& sequenceDir, int frameIndex) {
+  wchar_t name[64];
+  std::error_code ec;
+  std::swprintf(name, 64, L"frame_%06d.jpg", frameIndex);
+  if (fs::is_regular_file(fs::path(sequenceDir) / name, ec)) return true;
+  std::swprintf(name, 64, L"frame_%06d.png", frameIndex);
+  return fs::is_regular_file(fs::path(sequenceDir) / name, ec);
+}
+
+std::wstring detectFrameSequencePattern(const std::wstring& sequenceDir) {
+  std::error_code ec;
+  bool anyJpg = false, anyPng = false;
+  if (fs::exists(sequenceDir, ec)) {
+    for (auto& ent : fs::directory_iterator(sequenceDir, ec)) {
+      if (!ent.is_regular_file()) continue;
+      auto ext = ent.path().extension().wstring();
+      auto name = ent.path().filename().wstring();
+      if (name.rfind(L"frame_", 0) != 0) continue;
+      if (_wcsicmp(ext.c_str(), L".jpg") == 0 || _wcsicmp(ext.c_str(), L".jpeg") == 0)
+        anyJpg = true;
+      else if (_wcsicmp(ext.c_str(), L".png") == 0)
+        anyPng = true;
+      if (anyJpg && anyPng) break;
+    }
+  }
+  if (anyJpg) return L"frame_%06d.jpg";
+  if (anyPng) return L"frame_%06d.png";
+  return L"frame_%06d.png";
 }
 
 } // namespace mmdvr

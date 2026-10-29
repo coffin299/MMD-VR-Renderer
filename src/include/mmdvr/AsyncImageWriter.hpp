@@ -78,6 +78,8 @@ public:
     return !failed_.load();
   }
 
+  bool hasFailed() const { return failed_.load(); }
+
   void shutdown() {
     {
       std::lock_guard<std::mutex> lock(mu_);

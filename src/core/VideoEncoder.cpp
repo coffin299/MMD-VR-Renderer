@@ -1,7 +1,10 @@
 #include "mmdvr/VideoEncoder.hpp"
 #include "mmdvr/SphericalMp4Inject.hpp"
 #include "mmdvr/Diagnostics.hpp"
+#include "mmdvr/DiskSpace.hpp"
+#include "mmdvr/ImageSequenceWriter.hpp"
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -530,7 +533,9 @@ static int findFirstSequenceIndex(const std::wstring& sequenceDir) {
     auto name = ent.path().filename().string();
     if (name.size() < 16) continue;
     if (name.rfind("frame_", 0) != 0) continue;
-    if (ent.path().extension() != ".png") continue;
+    auto ext = ent.path().extension().string();
+    for (char& c : ext) c = static_cast<char>(tolower((unsigned char)c));
+    if (ext != ".png" && ext != ".jpg" && ext != ".jpeg") continue;
     try {
       int n = std::stoi(name.substr(6, 6));
       if (best < 0 || n < best) best = n;
@@ -549,10 +554,98 @@ static bool readPngSize(const std::wstring& path, int& outW, int& outH) {
   static const unsigned char sig[8] = {137, 80, 78, 71, 13, 10, 26, 10};
   for (int i = 0; i < 8; ++i)
     if (hdr[i] != sig[i]) return false;
-  // IHDR width/height are big-endian at bytes 16..23
   outW = (hdr[16] << 24) | (hdr[17] << 16) | (hdr[18] << 8) | hdr[19];
   outH = (hdr[20] << 24) | (hdr[21] << 16) | (hdr[22] << 8) | hdr[23];
   return outW > 0 && outH > 0;
+}
+
+static bool readJpegSize(const std::wstring& path, int& outW, int& outH) {
+  outW = outH = 0;
+  std::ifstream f(path, std::ios::binary);
+  if (!f) return false;
+  unsigned char b0 = 0, b1 = 0;
+  f.read(reinterpret_cast<char*>(&b0), 1);
+  f.read(reinterpret_cast<char*>(&b1), 1);
+  if (b0 != 0xFF || b1 != 0xD8) return false;
+  while (f) {
+    unsigned char marker = 0;
+    do {
+      f.read(reinterpret_cast<char*>(&marker), 1);
+      if (!f) return false;
+    } while (marker != 0xFF);
+    do {
+      f.read(reinterpret_cast<char*>(&marker), 1);
+      if (!f) return false;
+    } while (marker == 0xFF);
+    if (marker == 0xD9 || marker == 0xDA) return false;
+    unsigned char lenhi = 0, lenlo = 0;
+    f.read(reinterpret_cast<char*>(&lenhi), 1);
+    f.read(reinterpret_cast<char*>(&lenlo), 1);
+    if (!f) return false;
+    const int segLen = (lenhi << 8) | lenlo;
+    if (segLen < 2) return false;
+    if ((marker >= 0xC0 && marker <= 0xC3) || (marker >= 0xC5 && marker <= 0xC7) ||
+        (marker >= 0xC9 && marker <= 0xCB) || (marker >= 0xCD && marker <= 0xCF)) {
+      unsigned char prec = 0, hhi = 0, hlo = 0, whi = 0, wlo = 0;
+      f.read(reinterpret_cast<char*>(&prec), 1);
+      f.read(reinterpret_cast<char*>(&hhi), 1);
+      f.read(reinterpret_cast<char*>(&hlo), 1);
+      f.read(reinterpret_cast<char*>(&whi), 1);
+      f.read(reinterpret_cast<char*>(&wlo), 1);
+      (void)prec;
+      if (!f) return false;
+      outH = (hhi << 8) | hlo;
+      outW = (whi << 8) | wlo;
+      return outW > 0 && outH > 0;
+    }
+    f.seekg(segLen - 2, std::ios::cur);
+  }
+  return false;
+}
+
+static bool readSequenceFrameSize(const std::wstring& path, int& outW, int& outH) {
+  auto ext = fs::path(path).extension().string();
+  for (char& c : ext) c = static_cast<char>(tolower((unsigned char)c));
+  if (ext == ".jpg" || ext == ".jpeg") return readJpegSize(path, outW, outH);
+  return readPngSize(path, outW, outH);
+}
+
+static bool looksLikeDiskFull(const std::wstring& err) {
+  if (err.empty()) return false;
+  // FFmpeg / Win32 phrasing across locales we have seen in the wild.
+  const wchar_t* keys[] = {
+      L"No space left on device",
+      L"There is not enough space",
+      L"not enough space on the disk",
+      L"ディスクの空き領域が不足",
+      L"空き領域がありません",
+      L"exit -28",
+      L"exit 28",
+      L"code: -28",
+      L"ENOSPC",
+  };
+  for (auto* k : keys) {
+    if (err.find(k) != std::wstring::npos) return true;
+  }
+  return false;
+}
+
+static bool ensureEncodeDiskSpace(const std::wstring& outMp4, std::wstring* errorOut) {
+  const auto freeB = diskFreeBytes(outMp4);
+  if (freeB == 0 || freeB >= kMinFreeBytesEncode) return true;
+  std::wstring root = outMp4.size() >= 2 && outMp4[1] == L':' ? outMp4.substr(0, 3) : outMp4;
+  wchar_t msg[320];
+  std::swprintf(msg, 320,
+                L"出力先の空き容量が不足しています（%s 残り約 %.1f GB）。"
+                L"PNG連番が大きいとディスクが埋まります。空きを空けてから"
+                L"「MP4再エンコード」タブで再実行してください。",
+                root.c_str(), bytesToGiB(freeB));
+  Diagnostics::instance().infoW(msg);
+  if (errorOut) {
+    if (!errorOut->empty()) *errorOut += L"\n";
+    *errorOut += msg;
+  }
+  return false;
 }
 
 static bool runFfmpeg(const std::wstring& cmd, const std::wstring& workDir, std::wstring* errorOut) {
@@ -637,32 +730,35 @@ bool VideoEncoder::encodeSequence(
   auto caps = probe(ffmpegPath);
   auto ff = caps.path.empty() ? resolveFfmpeg(ffmpegPath) : caps.path;
   int startNum = findFirstSequenceIndex(sequenceDir);
+  // Prefer on-disk reality (jpg vs png) over the caller's pattern hint.
+  const std::wstring seqPattern = detectFrameSequencePattern(sequenceDir);
+  (void)pattern;
 
   int frameW = 0, frameH = 0;
   {
-    wchar_t firstName[64];
-    std::swprintf(firstName, 64, L"frame_%06d.png", startNum);
-    readPngSize(sequenceDir + L"\\" + firstName, frameW, frameH);
+    wchar_t firstName[72];
+    if (seqPattern.find(L".jpg") != std::wstring::npos)
+      std::swprintf(firstName, 72, L"frame_%06d.jpg", startNum);
+    else
+      std::swprintf(firstName, 72, L"frame_%06d.png", startNum);
+    readSequenceFrameSize(sequenceDir + L"\\" + firstName, frameW, frameH);
     if (frameW > 0) {
-      Diagnostics::instance().info(
-          "FFmpeg input frame size " + std::to_string(frameW) + "x" + std::to_string(frameH));
+      Diagnostics::instance().infoW(
+          L"FFmpeg input frame size " + std::to_wstring(frameW) + L"x" + std::to_wstring(frameH) +
+          L" (" + seqPattern + L")");
     }
   }
 
-  // Soft HEVC Level-7.2 fit used to decide Auto candidate list (keep high-res
-  // libx265 when HW would need a much smaller scale).
-  int softW = frameW, softH = frameH;
-  fitHevcEncodeSize(frameW, frameH, softW, softH);
+  if (!ensureEncodeDiskSpace(outMp4, errorOut)) {
+    if (fallbackOut) *fallbackOut = L"disk full (encode aborted before FFmpeg)";
+    return false;
+  }
 
   const EncImpl preferred = preferredImpl(codec, caps);
-  const bool forceHwFamily =
-      codec == EncodeCodec::Nvenc || codec == EncodeCodec::Qsv || codec == EncodeCodec::Amf;
-  // Explicit NVENC/QSV/AMF: ignore native size so we can scale into the HW cap.
-  // Auto: filter by soft HEVC size so NVENC is only picked when it fits that size.
-  auto candidates =
-      buildCandidates(codec, caps, forceHwFamily ? 0 : softW, forceHwFamily ? 0 : softH,
-                      forceHwFamily);
-  if (caps.hasLibx265) {
+  // Always allow per-impl scale-into-cap. Huge stereo 8K (30720×7680) must still
+  // pick hevc_nvenc (→~8192) before glacial libx265 — never drop to H.264 first.
+  auto candidates = buildCandidates(codec, caps, /*frameW*/ 0, /*frameH*/ 0, /*ignoreSize*/ true);
+  if (caps.hasLibx265 || caps.hasHevcNvenc || caps.hasHevcQsv || caps.hasHevcAmf) {
     std::vector<EncImpl> hevcOnly;
     for (auto i : candidates) {
       if (i == EncImpl::H264Nvenc || i == EncImpl::H264Qsv || i == EncImpl::H264Amf ||
@@ -681,7 +777,7 @@ bool VideoEncoder::encodeSequence(
   if (!candidates.empty() && preferred != candidates.front())
     setFallback(preferred, candidates.front());
 
-  std::wstring input = sequenceDir + L"\\" + pattern;
+  std::wstring input = sequenceDir + L"\\" + seqPattern;
   const bool hasAudio = !audioPath.empty() && fileExists(audioPath);
   if (!audioPath.empty() && !hasAudio) {
     Diagnostics::instance().warn("audioPath set but file missing; encoding video-only");
@@ -749,6 +845,17 @@ bool VideoEncoder::encodeSequence(
     }
     tried = candidates[i];
     if (tryEncode(tried)) return true;
+    // Disk full: further encoders will fail the same way and burn hours.
+    if (errorOut && looksLikeDiskFull(*errorOut)) {
+      Diagnostics::instance().warn("encode aborted: disk full (not retrying other encoders)");
+      // Replace the progress-spam tail so the UI MessageBox shows the real cause.
+      *errorOut =
+          L"ディスク空き容量不足でエンコードが中断しました（No space left on device）。\n"
+          L"PNG連番はそのまま残っています。出力ドライブの空きを確保し、"
+          L"不完全な *_raw.mp4 を消してから「MP4再エンコード」を実行してください。";
+      if (fallbackOut) *fallbackOut = L"disk full (HEVC aborted — not an H.264 issue)";
+      return false;
+    }
   }
   if (errorOut) {
     *errorOut += L"\nEncode failed; PNG sequence is intact — use the Re-encode tab.\n";

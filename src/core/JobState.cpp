@@ -1,5 +1,6 @@
 #include "mmdvr/JobState.hpp"
 #include "mmdvr/Diagnostics.hpp"
+#include "mmdvr/ImageSequenceWriter.hpp"
 #include <nlohmann/json.hpp>
 #include <cstdio>
 #include <filesystem>
@@ -125,14 +126,10 @@ bool JobState::load(const std::wstring& path, JobStateData& out) {
 }
 
 int JobState::firstMissingPngFrame(const std::wstring& pngDir, int frameStart, int frameEnd) {
-  namespace fs = std::filesystem;
   if (frameStart < 0) frameStart = 0;
   const int hardCap = (frameEnd >= frameStart) ? frameEnd : (frameStart + 200000);
   for (int f = frameStart; f <= hardCap; ++f) {
-    wchar_t name[64];
-    std::swprintf(name, 64, L"frame_%06d.png", f);
-    std::error_code ec;
-    if (!fs::is_regular_file(fs::path(pngDir) / name, ec))
+    if (!frameSequenceFileExists(pngDir, f))
       return f;
   }
   return hardCap + 1;

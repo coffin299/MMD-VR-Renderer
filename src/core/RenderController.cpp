@@ -4,6 +4,7 @@
 #include "mmdvr/StereoEngine.hpp"
 #include "mmdvr/VideoEncoder.hpp"
 #include "mmdvr/Diagnostics.hpp"
+#include "mmdvr/DiskSpace.hpp"
 #include "mmdvr/MathUtil.hpp"
 #include "mmdvr/Parallel.hpp"
 #include <algorithm>
@@ -181,6 +182,51 @@ void RenderController::resume() {
 void RenderController::waitIfPaused() {
   while (paused_.load() && !cancel_.load()) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+}
+
+void RenderController::pauseForLowDisk(const std::wstring& outputDir) {
+  if (!running_.load() || cancel_.load()) return;
+  // Flush queued PNGs first so we don't lose in-flight frames to ENOSPC.
+  if (asyncWriter_) asyncWriter_->waitUntilPendingAtMost(0);
+
+  const auto freeB = diskFreeBytes(outputDir);
+  wchar_t note[192];
+  std::swprintf(note, 192, L"free≈%.2f GiB (need ≥%.0f GiB)", bytesToGiB(freeB),
+                bytesToGiB(kMinFreeBytesCapture));
+
+  if (!paused_.load()) {
+    Diagnostics::instance().warn(
+        std::string("Auto-pause: output disk nearly full (") +
+        std::to_string(bytesToGiB(freeB)) + " GiB free)");
+    pause();
+  }
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    progress_.stage = L"paused_disk";
+    progress_.stageNote = note;
+    progress_.paused = true;
+    progress_.lastError = L"disk nearly full";
+  }
+  if (progressCb_) progressCb_(progress());
+}
+
+void RenderController::waitIfPausedOrLowDisk() {
+  for (;;) {
+    waitIfPaused();
+    if (cancel_.load()) return;
+
+    const auto s = settings();
+    const std::wstring dir = !s.outputDir.empty() ? s.outputDir : s.pngSequenceDir();
+    const auto freeB = diskFreeBytes(dir);
+    // freeB==0 → query failed; do not false-pause.
+    if (freeB == 0 || freeB >= kMinFreeBytesCapture) {
+      std::lock_guard<std::mutex> lock(mu_);
+      if (progress_.lastError == L"disk nearly full") progress_.lastError.clear();
+      return;
+    }
+    pauseForLowDisk(dir);
+    // User frees space and hits Resume; loop re-checks free bytes.
   }
 }
 
@@ -389,7 +435,7 @@ bool RenderController::renderEye(bool leftEye, ImageBuffer& outEye) {
 }
 
 bool RenderController::processAnimationFrame(int frameIndex) {
-  waitIfPaused();
+  waitIfPausedOrLowDisk();
   if (cancel_.load()) return false;
   auto s = settings();
   {
@@ -506,6 +552,17 @@ bool RenderController::processAnimationFrame(int frameIndex) {
     }
   }
 
+  // PNG write may fail asynchronously on a full disk — pause so the user can free space.
+  // hasFailed sticks; after Resume we still abort this frame if writes keep failing.
+  if (asyncWriter_ && asyncWriter_->hasFailed()) {
+    Diagnostics::instance().error("PNG writer failed (often disk full); auto-pausing");
+    const auto sDisk = settings();
+    pauseForLowDisk(!sDisk.outputDir.empty() ? sDisk.outputDir : sDisk.pngSequenceDir());
+    waitIfPaused();
+    if (cancel_.load()) return false;
+    if (asyncWriter_->hasFailed()) return false;
+  }
+
   JobStateData js;
   js.settings = s;
   js.lastCompletedFrame = frameIndex;
@@ -599,7 +656,7 @@ bool RenderController::start(ProgressCallback cb) {
 
   bool ok = true;
   for (int f = start; f <= end; ++f) {
-    waitIfPaused();
+    waitIfPausedOrLowDisk();
     if (cancel_.load()) {
       ok = false;
       break;
