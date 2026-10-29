@@ -2,8 +2,7 @@
 #include "PluginHost.hpp"
 #include "mmdvr/Diagnostics.hpp"
 #include <atomic>
-#include <cstring>
-#include <intrin.h>
+#include <cstdint>
 
 #if MMDVR_HAS_MINHOOK
 #include <MinHook.h>
@@ -25,12 +24,11 @@ using SetRenderTarget_t = HRESULT (WINAPI*)(IDirect3DDevice9*, DWORD, IDirect3DS
 using BeginScene_t = HRESULT (WINAPI*)(IDirect3DDevice9*);
 using DrawPrimitive_t = HRESULT (WINAPI*)(IDirect3DDevice9*, D3DPRIMITIVETYPE, UINT, UINT);
 using DrawIndexedPrimitive_t = HRESULT (WINAPI*)(IDirect3DDevice9*, D3DPRIMITIVETYPE, INT, UINT, UINT, UINT, UINT);
-using MmdDrawLocalGizmo_t = void (*)(void*, void*);
-using MmdDrawText_t = void (*)(void*, const char*, void*, uintptr_t, uintptr_t,
-                                uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t);
-using MmdDrawPanelPrimitive_t = void (*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t,
-                                         uintptr_t, uintptr_t, uintptr_t, uintptr_t,
-                                         uintptr_t, uintptr_t);
+using DrawPrimitiveUP_t = HRESULT (WINAPI*)(IDirect3DDevice9*, D3DPRIMITIVETYPE, UINT,
+                                             const void*, UINT);
+using DrawIndexedPrimitiveUP_t = HRESULT (WINAPI*)(IDirect3DDevice9*, D3DPRIMITIVETYPE,
+                                                    UINT, UINT, UINT, const void*, D3DFORMAT,
+                                                    const void*, UINT);
 
 static CreateDevice_t g_CreateDevice = nullptr;
 static Present_t g_Present = nullptr;
@@ -43,42 +41,24 @@ static SetRenderTarget_t g_SetRenderTarget = nullptr;
 static BeginScene_t g_BeginScene = nullptr;
 static DrawPrimitive_t g_DrawPrimitive = nullptr;
 static DrawIndexedPrimitive_t g_DrawIndexedPrimitive = nullptr;
-static MmdDrawLocalGizmo_t g_MmdDrawLocalGizmo = nullptr;
-static MmdDrawText_t g_MmdDrawText = nullptr;
-static MmdDrawPanelPrimitive_t g_MmdDrawPanelPrimitive = nullptr;
+static DrawPrimitiveUP_t g_DrawPrimitiveUP = nullptr;
+static DrawIndexedPrimitiveUP_t g_DrawIndexedPrimitiveUP = nullptr;
 static bool g_hooksInstalled = false;
-static bool g_mmdGizmoHookInstalled = false;
-static bool g_mmdGizmoTextHookInstalled = false;
-static bool g_mmdGizmoPrimitiveHookInstalled = false;
 static int g_presentDepth = 0;
 
 // VR face capture: rewrite main-camera VIEW/PROJ for the whole Present cycle.
 static std::atomic<bool> g_transformOverride{false};
 static std::atomic<bool> g_suppressMmdLocalGizmo{false};
 
-// MMD 9.32 x64 — narrow color-panel draw inside the Local X/Y/Z control.
-// The previous enclosing routine at 0x225C0 also owns UI-frame state, so it
-// must complete. This leaf only paints the Local XYZ panel and has one caller
-// in that path (0x2278E).
-constexpr uintptr_t kMmdLocalGizmoRva = 0x25BF0;
-constexpr uintptr_t kMmdLocalGizmoCallerRva = 0x2278E;
-constexpr unsigned char kMmdLocalGizmoSig[] = {
-    0x48, 0x89, 0x5C, 0x24, 0x18, 0x55, 0x56, 0x57,
-    0x41, 0x54, 0x41, 0x55, 0x48, 0x83, 0xEC, 0x80};
-// MMD 9.32 x64 text helper. The Local XYZ control reaches it with "local"
-// and the six single-character X/Y/Z labels seen in the capture.
-constexpr uintptr_t kMmdDrawTextRva = 0x26950;
-constexpr unsigned char kMmdDrawTextSig[] = {
-    0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x6C,
-    0x24, 0x18, 0x48, 0x89, 0x74, 0x24, 0x20, 0x57};
-// Generic rectangle/line primitive used by the Local XYZ UI. Suppress only
-// calls from the enclosing Local control, not calls from other MMD panels.
-constexpr uintptr_t kMmdDrawPanelPrimitiveRva = 0x264E0;
-constexpr uintptr_t kMmdLocalGizmoRoutineBeginRva = 0x225C0;
-constexpr uintptr_t kMmdLocalGizmoRoutineEndRva = 0x25BD8;
-constexpr unsigned char kMmdDrawPanelPrimitiveSig[] = {
-    0x40, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55,
-    0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xEC, 0x60};
+// MikuDanceStudio / MMD 9.32 x64: Local XYZ is a sprite-atlas strip produced only
+// when app->playbackActive (== +0x368) is 0. Forcing that byte during capture
+// skips the strip and the bone/camera operation rows without touching scene draws.
+// App singleton pointer lives at image RVA 0x1445F8 (g_Block equivalent).
+constexpr uintptr_t kMmdAppPtrRva = 0x1445F8;
+constexpr uintptr_t kMmdPlaybackActiveOff = 0x368;
+static bool g_savedPlaybackValid = false;
+static std::uint8_t g_savedPlayback = 0;
+static bool g_playbackGateLogged = false;
 
 void SetTransformOverrideEnabled(bool on) {
   g_transformOverride.store(on, std::memory_order_release);
@@ -88,123 +68,42 @@ bool IsTransformOverrideEnabled() {
   return g_transformOverride.load(std::memory_order_acquire);
 }
 
+static std::uint8_t* mmdPlaybackActiveFlag() {
+  HMODULE mmd = GetModuleHandleW(nullptr);
+  if (!mmd) return nullptr;
+  auto** appSlot = reinterpret_cast<std::uint8_t**>(
+      reinterpret_cast<uintptr_t>(mmd) + kMmdAppPtrRva);
+  // The slot is in MMD .data; until CreateDevice finishes it may still be null.
+  if (!appSlot || !*appSlot) return nullptr;
+  return *appSlot + kMmdPlaybackActiveOff;
+}
+
 void SetMmdLocalGizmoSuppress(bool on) {
   g_suppressMmdLocalGizmo.store(on, std::memory_order_release);
-}
-
-static void Hook_MmdDrawLocalGizmo(void* context, void* canvas) {
-  const auto returnAddress = reinterpret_cast<uintptr_t>(_ReturnAddress());
-  const auto mmdBase = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
-  if (g_suppressMmdLocalGizmo.load(std::memory_order_acquire) &&
-      returnAddress == mmdBase + kMmdLocalGizmoCallerRva)
-    return;
-  g_MmdDrawLocalGizmo(context, canvas);
-}
-
-static bool isMmdLocalGizmoLabel(const char* text) {
-  if (!text) return false;
-  if ((text[0] == 'X' || text[0] == 'Y' || text[0] == 'Z') && text[1] == '\0')
-    return true;
-  return std::strcmp(text, "local") == 0;
-}
-
-static void Hook_MmdDrawText(void* context, const char* text, void* font,
-                             uintptr_t style, uintptr_t arg5, uintptr_t arg6,
-                             uintptr_t arg7, uintptr_t arg8, uintptr_t arg9,
-                             uintptr_t arg10) {
-  if (g_suppressMmdLocalGizmo.load(std::memory_order_acquire) &&
-      isMmdLocalGizmoLabel(text))
-    return;
-  g_MmdDrawText(context, text, font, style, arg5, arg6, arg7, arg8, arg9, arg10);
-}
-
-static void Hook_MmdDrawPanelPrimitive(
-    uintptr_t arg1, uintptr_t arg2, uintptr_t arg3, uintptr_t arg4,
-    uintptr_t arg5, uintptr_t arg6, uintptr_t arg7, uintptr_t arg8,
-    uintptr_t arg9, uintptr_t arg10) {
-  const auto returnAddress = reinterpret_cast<uintptr_t>(_ReturnAddress());
-  const auto mmdBase = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
-  const auto callerRva = returnAddress - mmdBase;
-  if (g_suppressMmdLocalGizmo.load(std::memory_order_acquire) &&
-      callerRva >= kMmdLocalGizmoRoutineBeginRva &&
-      callerRva < kMmdLocalGizmoRoutineEndRva)
-    return;
-  g_MmdDrawPanelPrimitive(arg1, arg2, arg3, arg4, arg5,
-                          arg6, arg7, arg8, arg9, arg10);
-}
-
-static void tryInstallMmdLocalGizmoHook() {
-  if (g_mmdGizmoHookInstalled) return;
-  HMODULE mmd = GetModuleHandleW(nullptr);
-  if (!mmd) return;
-  auto* target = reinterpret_cast<unsigned char*>(
-      reinterpret_cast<uintptr_t>(mmd) + kMmdLocalGizmoRva);
-  // MMD 9.32 x64 image is large enough that this RVA stays inside .text.
-  if (std::memcmp(target, kMmdLocalGizmoSig, sizeof(kMmdLocalGizmoSig)) != 0) {
-    Diagnostics::instance().warn(
-        "MMD Local XYZ gizmo hook skipped (signature mismatch; pixel cleanup only)");
-    g_mmdGizmoHookInstalled = true; // do not retry every Present
+  std::uint8_t* flag = mmdPlaybackActiveFlag();
+  if (!flag) {
+    if (on && !g_playbackGateLogged) {
+      g_playbackGateLogged = true;
+      Diagnostics::instance().warn(
+          "MMD Local XYZ playback gate unavailable (app ptr null; pixel cleanup only)");
+    }
     return;
   }
-  if (MH_CreateHook(target, &Hook_MmdDrawLocalGizmo,
-                    reinterpret_cast<LPVOID*>(&g_MmdDrawLocalGizmo)) != MH_OK ||
-      MH_EnableHook(target) != MH_OK) {
-    Diagnostics::instance().warn("MMD Local XYZ gizmo MinHook install failed");
-    g_mmdGizmoHookInstalled = true;
-    return;
+  if (on) {
+    if (!g_savedPlaybackValid) {
+      g_savedPlayback = *flag;
+      g_savedPlaybackValid = true;
+      if (!g_playbackGateLogged) {
+        g_playbackGateLogged = true;
+        Diagnostics::instance().info(
+            "MMD Local XYZ suppress via playbackActive(+0x368) while capture armed");
+      }
+    }
+    *flag = 1;
+  } else if (g_savedPlaybackValid) {
+    *flag = g_savedPlayback;
+    g_savedPlaybackValid = false;
   }
-  g_mmdGizmoHookInstalled = true;
-  Diagnostics::instance().info(
-      "Hooked MMD Local XYZ panel leaf draw (skip while capture armed)");
-}
-
-static void tryInstallMmdLocalGizmoTextHook() {
-  if (g_mmdGizmoTextHookInstalled) return;
-  HMODULE mmd = GetModuleHandleW(nullptr);
-  if (!mmd) return;
-  auto* target = reinterpret_cast<unsigned char*>(
-      reinterpret_cast<uintptr_t>(mmd) + kMmdDrawTextRva);
-  if (std::memcmp(target, kMmdDrawTextSig, sizeof(kMmdDrawTextSig)) != 0) {
-    Diagnostics::instance().warn(
-        "MMD Local XYZ text hook skipped (signature mismatch; pixel cleanup only)");
-    g_mmdGizmoTextHookInstalled = true;
-    return;
-  }
-  if (MH_CreateHook(target, &Hook_MmdDrawText,
-                    reinterpret_cast<LPVOID*>(&g_MmdDrawText)) != MH_OK ||
-      MH_EnableHook(target) != MH_OK) {
-    Diagnostics::instance().warn("MMD Local XYZ text MinHook install failed");
-    g_mmdGizmoTextHookInstalled = true;
-    return;
-  }
-  g_mmdGizmoTextHookInstalled = true;
-  Diagnostics::instance().info(
-      "Hooked MMD Local XYZ text draw (skip local/X/Y/Z while capture armed)");
-}
-
-static void tryInstallMmdLocalGizmoPrimitiveHook() {
-  if (g_mmdGizmoPrimitiveHookInstalled) return;
-  HMODULE mmd = GetModuleHandleW(nullptr);
-  if (!mmd) return;
-  auto* target = reinterpret_cast<unsigned char*>(
-      reinterpret_cast<uintptr_t>(mmd) + kMmdDrawPanelPrimitiveRva);
-  if (std::memcmp(target, kMmdDrawPanelPrimitiveSig,
-                  sizeof(kMmdDrawPanelPrimitiveSig)) != 0) {
-    Diagnostics::instance().warn(
-        "MMD Local XYZ primitive hook skipped (signature mismatch)");
-    g_mmdGizmoPrimitiveHookInstalled = true;
-    return;
-  }
-  if (MH_CreateHook(target, &Hook_MmdDrawPanelPrimitive,
-                    reinterpret_cast<LPVOID*>(&g_MmdDrawPanelPrimitive)) != MH_OK ||
-      MH_EnableHook(target) != MH_OK) {
-    Diagnostics::instance().warn("MMD Local XYZ primitive MinHook install failed");
-    g_mmdGizmoPrimitiveHookInstalled = true;
-    return;
-  }
-  g_mmdGizmoPrimitiveHookInstalled = true;
-  Diagnostics::instance().info(
-      "Hooked MMD Local XYZ panel primitives (skip while capture armed)");
 }
 
 static void* vtable_slot(void* obj, size_t index) {
@@ -291,11 +190,30 @@ static HRESULT WINAPI Hook_DrawIndexedPrimitive(
   return g_DrawIndexedPrimitive(self, t, b, m, n, start, count);
 }
 
+static HRESULT WINAPI Hook_DrawPrimitiveUP(
+    IDirect3DDevice9* self, D3DPRIMITIVETYPE type, UINT primitiveCount,
+    const void* vertexStreamZeroData, UINT vertexStreamZeroStride) {
+  noteDraw();
+  return g_DrawPrimitiveUP(self, type, primitiveCount, vertexStreamZeroData,
+                           vertexStreamZeroStride);
+}
+
+static HRESULT WINAPI Hook_DrawIndexedPrimitiveUP(
+    IDirect3DDevice9* self, D3DPRIMITIVETYPE type, UINT minVertexIndex,
+    UINT numVertices, UINT primitiveCount, const void* indexData,
+    D3DFORMAT indexDataFormat, const void* vertexStreamZeroData,
+    UINT vertexStreamZeroStride) {
+  noteDraw();
+  return g_DrawIndexedPrimitiveUP(self, type, minVertexIndex, numVertices,
+                                  primitiveCount, indexData, indexDataFormat,
+                                  vertexStreamZeroData, vertexStreamZeroStride);
+}
+
 void HookDevice(IDirect3DDevice9* device) {
   if (!device) return;
   // 16 Reset, 17 Present, 32 GetRenderTargetData, 34 StretchRect,
   // 37 SetRenderTarget, 41 BeginScene,
-  // 44 SetTransform, 45 GetTransform, 81 DrawPrimitive, 82 DrawIndexedPrimitive
+  // 44 SetTransform, 45 GetTransform, 81-84 DrawPrimitive variants
   void* pReset = vtable_slot(device, 16);
   void* pPresent = vtable_slot(device, 17);
   void* pGetRenderTargetData = vtable_slot(device, 32);
@@ -306,6 +224,8 @@ void HookDevice(IDirect3DDevice9* device) {
   void* pGetTransform = vtable_slot(device, 45);
   void* pDrawPrim = vtable_slot(device, 81);
   void* pDrawIndexed = vtable_slot(device, 82);
+  void* pDrawPrimUP = vtable_slot(device, 83);
+  void* pDrawIndexedUP = vtable_slot(device, 84);
 
   if (!g_hooksInstalled) {
     g_hooksInstalled = true;
@@ -319,9 +239,12 @@ void HookDevice(IDirect3DDevice9* device) {
     MH_CreateHook(pGetTransform, &Hook_GetTransform, (LPVOID*)&g_GetTransform);
     MH_CreateHook(pDrawPrim, &Hook_DrawPrimitive, (LPVOID*)&g_DrawPrimitive);
     MH_CreateHook(pDrawIndexed, &Hook_DrawIndexedPrimitive, (LPVOID*)&g_DrawIndexedPrimitive);
+    MH_CreateHook(pDrawPrimUP, &Hook_DrawPrimitiveUP, (LPVOID*)&g_DrawPrimitiveUP);
+    MH_CreateHook(pDrawIndexedUP, &Hook_DrawIndexedPrimitiveUP,
+                  (LPVOID*)&g_DrawIndexedPrimitiveUP);
     MH_EnableHook(MH_ALL_HOOKS);
     Diagnostics::instance().info(
-        "Device hooks installed (Present/Reset/GetRenderTargetData/StretchRect/SetRT/BeginScene/Set|GetTransform/Draw*)");
+        "Device hooks installed (Present/Reset/GetRenderTargetData/StretchRect/SetRT/BeginScene/Set|GetTransform/Draw*+UP)");
   }
   PluginHost::instance().onDeviceCreated(device);
 }
@@ -341,9 +264,6 @@ void HookDirect3D9(IDirect3D9* d3d) {
   if (once || !d3d) return;
   once = true;
   MH_Initialize();
-  tryInstallMmdLocalGizmoHook();
-  tryInstallMmdLocalGizmoTextHook();
-  tryInstallMmdLocalGizmoPrimitiveHook();
   void* pCreate = vtable_slot(d3d, 16);
   MH_CreateHook(pCreate, &Hook_CreateDevice, (LPVOID*)&g_CreateDevice);
   MH_EnableHook(pCreate);

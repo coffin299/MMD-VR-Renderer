@@ -11,9 +11,9 @@ void HookDevice(IDirect3DDevice9* device);
 void SetTransformOverrideEnabled(bool on);
 bool IsTransformOverrideEnabled();
 
-// Skip MMD 9.32's lower-right Local X/Y/Z model-operation gizmo draws while
-// a capture is armed. Pixel cleanup remains as a fallback if the RVA hook
-// cannot be installed (non-9.32 build / signature mismatch).
+// While capture is armed, force MMD 9.32's playbackActive gate so the Local
+// XYZ sprite strip is not produced (same path as real playback). Pixel cleanup
+// remains as a fallback if the app singleton is not ready yet.
 void SetMmdLocalGizmoSuppress(bool on);
 
 } // namespace mmdvr
