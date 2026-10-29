@@ -38,8 +38,8 @@ GitHub Release Full Changelog → this file on the release tag.
   EN: 8K storage warnings in the resolution combo, size line, and notes (JA+EN)
 
 ### 修正 / Fixed
-- JA: **8Kなのにぼやける／UI混入／右目欠け**: 出力サイズ設定後もスキップPresentで高解像度ステージを捨てていた。ステージ許可＋SetRT捕捉＋軸非表示強化
-  EN: **Soft 8K / UI leak / broken right eye**: skipped Present dropped hi-res staging; allow stage during skip, SetRT capture, stronger axis hide
+- JA: **8Kなのにぼやける／UI混入／右目欠け**: ray-mmd の HDR 描画面を 8-bit へコピーして失敗し、低解像度の UI 入りフォールバックを使っていた。HDR 形式のまま読み出して変換
+  EN: **Soft 8K / UI leak / broken right eye**: HDR ray-mmd targets could not copy to 8-bit staging, forcing a low-resolution UI fallback; read back HDR surfaces directly
 - JA: **8Kなのにぼやける**: ウィンドウ(~772²)を拡大していた。MMD「出力サイズ」を面解像度(最大8192)に設定して実キャプチャ
   EN: **Soft “8K” output**: was upscaling the ~772² window; now sets MMD output size to face res (cap 8192) for real capture
 - JA: **8K ステレオ MP4 がディスク満杯で落ち、H.264 に見えてしまう**: 空き不足を事前検知／再試行停止し、巨大解像度でも HEVC NVENC→libx265 を維持

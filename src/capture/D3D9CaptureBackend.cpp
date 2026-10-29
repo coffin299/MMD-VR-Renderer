@@ -4,8 +4,11 @@
 #include "mmdvr/D3D9CaptureBackend.hpp"
 #include "mmdvr/Diagnostics.hpp"
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <string>
 
 namespace mmdvr {
 
@@ -139,6 +142,80 @@ static D3DFORMAT pickReadableFormat(D3DFORMAT src) {
   }
 }
 
+static float halfToFloat(uint16_t h) {
+  const uint32_t sign = static_cast<uint32_t>(h & 0x8000) << 16;
+  uint32_t exponent = (h >> 10) & 0x1f;
+  uint32_t mantissa = h & 0x03ff;
+  uint32_t bits = 0;
+  if (exponent == 0) {
+    if (mantissa != 0) {
+      exponent = 1;
+      while ((mantissa & 0x0400) == 0) {
+        mantissa <<= 1;
+        --exponent;
+      }
+      mantissa &= 0x03ff;
+      bits = sign | ((exponent + 112) << 23) | (mantissa << 13);
+    } else {
+      bits = sign;
+    }
+  } else if (exponent == 31) {
+    bits = sign | 0x7f800000 | (mantissa << 13);
+  } else {
+    bits = sign | ((exponent + 112) << 23) | (mantissa << 13);
+  }
+  float value = 0.0f;
+  memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+
+static uint8_t toByte(float value) {
+  value = (std::max)(0.0f, (std::min)(1.0f, value));
+  return static_cast<uint8_t>(value * 255.0f + 0.5f);
+}
+
+static bool copySurfacePixelsRgba(
+    ImageBuffer& out, const D3DLOCKED_RECT& locked, int width, int height, D3DFORMAT format) {
+  out.resize(width, height);
+  const auto* base = static_cast<const uint8_t*>(locked.pBits);
+  for (int y = 0; y < height; ++y) {
+    const uint8_t* row = base + y * locked.Pitch;
+    uint8_t* dst = out.rgba.data() + static_cast<size_t>(y) * static_cast<size_t>(width) * 4;
+    for (int x = 0; x < width; ++x) {
+      uint8_t r = 0, g = 0, b = 0, a = 255;
+      switch (format) {
+      case D3DFMT_A8R8G8B8:
+      case D3DFMT_X8R8G8B8:
+        b = row[x * 4 + 0]; g = row[x * 4 + 1]; r = row[x * 4 + 2];
+        a = format == D3DFMT_A8R8G8B8 ? row[x * 4 + 3] : 255;
+        break;
+      case D3DFMT_A8B8G8R8:
+      case D3DFMT_X8B8G8R8:
+        r = row[x * 4 + 0]; g = row[x * 4 + 1]; b = row[x * 4 + 2];
+        a = format == D3DFMT_A8B8G8R8 ? row[x * 4 + 3] : 255;
+        break;
+      case D3DFMT_A16B16G16R16F: {
+        const auto* p = reinterpret_cast<const uint16_t*>(row + x * 8);
+        b = toByte(halfToFloat(p[0]));
+        g = toByte(halfToFloat(p[1]));
+        r = toByte(halfToFloat(p[2]));
+        a = toByte(halfToFloat(p[3]));
+        break;
+      }
+      default:
+        Diagnostics::instance().error(
+            "Unsupported D3D surface format for capture: " + std::to_string((int)format));
+        return false;
+      }
+      dst[x * 4 + 0] = r;
+      dst[x * 4 + 1] = g;
+      dst[x * 4 + 2] = b;
+      dst[x * 4 + 3] = a ? a : 255;
+    }
+  }
+  return true;
+}
+
 bool D3D9CaptureBackend::stageSurface(IDirect3DSurface9* source, int preferW, int preferH) {
   if (!source) return false;
 
@@ -153,7 +230,10 @@ bool D3D9CaptureBackend::stageSurface(IDirect3DSurface9* source, int preferW, in
   if (FAILED(source->GetDesc(&desc)) || desc.Width == 0 || desc.Height == 0)
     return false;
 
-  const D3DFORMAT fmt = pickReadableFormat(desc.Format);
+  // HDR ray-mmd targets cannot be StretchRect-converted into A8R8G8B8
+  // (D3DERR_INVALIDCALL). Keep their native format through the staging copy,
+  // then convert the system-memory pixels after GetRenderTargetData.
+  const D3DFORMAT fmt = desc.Format;
   const int srcW = static_cast<int>(desc.Width);
   const int srcH = static_cast<int>(desc.Height);
   const int dstW = preferW > 0 ? preferW : srcW;
@@ -178,9 +258,10 @@ bool D3D9CaptureBackend::stageSurface(IDirect3DSurface9* source, int preferW, in
   const HRESULT hr = dev->StretchRect(source, nullptr, staged, nullptr, filter);
   staged->Release();
   if (FAILED(hr)) {
-    char buf[128];
-    std::snprintf(buf, sizeof(buf), "StretchRect pre-overlay stage failed hr=0x%08lX",
-                  static_cast<unsigned long>(hr));
+    char buf[224];
+    std::snprintf(buf, sizeof(buf),
+                  "StretchRect pre-overlay stage failed hr=0x%08lX src=%dx%d fmt=%u dst=%dx%d",
+                  static_cast<unsigned long>(hr), srcW, srcH, static_cast<unsigned>(fmt), dstW, dstH);
     Diagnostics::instance().error(buf);
     clearStagedSurface();
     return false;
@@ -417,30 +498,12 @@ bool D3D9CaptureBackend::captureViewport(ImageBuffer& out, int maxSide) {
     return false;
   }
 
-  // Single-threaded convert: Present thread must not spawn worker pools.
-  const int w = dstW, h = dstH;
-  out.resize(w, h);
-  auto* srcBase = static_cast<const uint8_t*>(lr.pBits);
-  const int pitch = lr.Pitch;
-  for (int y = 0; y < h; ++y) {
-    const uint8_t* row = srcBase + y * pitch;
-    uint8_t* dst = out.rgba.data() + (size_t)y * (size_t)w * 4;
-    for (int x = 0; x < w; ++x) {
-      uint8_t b = row[x * 4 + 0];
-      uint8_t g = row[x * 4 + 1];
-      uint8_t r = row[x * 4 + 2];
-      uint8_t a = row[x * 4 + 3];
-      dst[x * 4 + 0] = r;
-      dst[x * 4 + 1] = g;
-      dst[x * 4 + 2] = b;
-      dst[x * 4 + 3] = a ? a : 255;
-    }
-  }
-
+  // Single-threaded conversion: Present must not spawn worker pools.
+  const bool copied = copySurfacePixelsRgba(out, lr, dstW, dstH, fmt);
   sys->UnlockRect();
   sys->Release();
   restoreDeviceBindings();
-  return true;
+  return copied;
 }
 
 bool D3D9CaptureBackend::captureStaged(ImageBuffer& out, int maxSide) {
@@ -497,9 +560,11 @@ bool D3D9CaptureBackend::captureStaged(ImageBuffer& out, int maxSide) {
   }
 
   bool poolOk = false;
+  D3DFORMAT readFmt = stagedFmt;
   {
     std::lock_guard<std::mutex> lock(mu_);
     poolOk = ensurePool(dev, dstW, dstH, stagedFmt);
+    readFmt = poolFmt_;
   }
   if (!poolOk) {
     staged->Release();
@@ -554,25 +619,10 @@ bool D3D9CaptureBackend::captureStaged(ImageBuffer& out, int maxSide) {
     sys->Release();
     return false;
   }
-  out.resize(dstW, dstH);
-  const auto* srcBase = static_cast<const uint8_t*>(lr.pBits);
-  for (int y = 0; y < dstH; ++y) {
-    const uint8_t* row = srcBase + y * lr.Pitch;
-    uint8_t* dst = out.rgba.data() + static_cast<size_t>(y) * static_cast<size_t>(dstW) * 4;
-    for (int x = 0; x < dstW; ++x) {
-      const uint8_t b = row[x * 4 + 0];
-      const uint8_t g = row[x * 4 + 1];
-      const uint8_t r = row[x * 4 + 2];
-      const uint8_t a = row[x * 4 + 3];
-      dst[x * 4 + 0] = r;
-      dst[x * 4 + 1] = g;
-      dst[x * 4 + 2] = b;
-      dst[x * 4 + 3] = a ? a : 255;
-    }
-  }
+  const bool copied = copySurfacePixelsRgba(out, lr, dstW, dstH, readFmt);
   sys->UnlockRect();
   sys->Release();
-  return true;
+  return copied;
 }
 
 } // namespace mmdvr

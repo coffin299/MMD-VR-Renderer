@@ -134,7 +134,9 @@ static std::string runCaptureOutput(const std::wstring& cmd) {
 #endif
 }
 
-static bool runFfmpeg(const std::wstring& cmd, const std::wstring& workDir, std::wstring* errorOut);
+static bool runFfmpeg(
+    const std::wstring& cmd, const std::wstring& workDir, std::wstring* errorOut,
+    bool logFailure = true);
 
 // Concrete FFmpeg encoder picked at encode time (UI still uses EncodeCodec).
 enum class EncImpl : int {
@@ -315,11 +317,11 @@ static bool smokeTestImpl(const std::wstring& ff, EncImpl impl) {
       << implArgs(impl)
       << quote(outPath.wstring());
   std::wstring err;
-  const bool ok = runFfmpeg(cmd.str(), outPath.parent_path().wstring(), &err);
+  const bool ok = runFfmpeg(cmd.str(), outPath.parent_path().wstring(), &err, false);
   fs::remove(outPath, ec);
   if (!ok) {
-    Diagnostics::instance().warn(
-        std::string("HW encoder smoke-test failed impl=") + std::to_string((int)impl));
+    Diagnostics::instance().info(
+        std::string("HW encoder unavailable (smoke test) impl=") + std::to_string((int)impl));
   }
   return ok;
 }
@@ -648,7 +650,8 @@ static bool ensureEncodeDiskSpace(const std::wstring& outMp4, std::wstring* erro
   return false;
 }
 
-static bool runFfmpeg(const std::wstring& cmd, const std::wstring& workDir, std::wstring* errorOut) {
+static bool runFfmpeg(
+    const std::wstring& cmd, const std::wstring& workDir, std::wstring* errorOut, bool logFailure) {
 #ifdef _WIN32
   auto errPath = fs::temp_directory_path() / L"mmdvr_ffmpeg_err.txt";
   SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
@@ -690,7 +693,8 @@ static bool runFfmpeg(const std::wstring& cmd, const std::wstring& workDir, std:
     }
   }
   if (code != 0) {
-    Diagnostics::instance().warn(std::string("ffmpeg stderr tail: ") + errTail);
+    if (logFailure)
+      Diagnostics::instance().warn(std::string("ffmpeg stderr tail: ") + errTail);
     if (errorOut) {
       *errorOut = L"ffmpeg exit " + std::to_wstring((long)code);
       if (!errTail.empty()) {
