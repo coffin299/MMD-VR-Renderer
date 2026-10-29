@@ -729,6 +729,9 @@ bool PluginHost::captureView(ImageBuffer& out) {
   controller_.camera().endOverride();
   SetTransformOverrideEnabled(false);
   capture_.clearStagedSurface();
+  // applyCameraFace posts a paint request. Hide MMD's FPS/local text and
+  // coordinate axes before that request can produce a candidate capture.
+  timeline_.suppressViewportOverlays();
   {
     std::lock_guard<std::mutex> lock(redrawMu_);
     captureReady_ = false;
@@ -821,7 +824,6 @@ bool PluginHost::renderView(const CameraState& cam, ImageBuffer& out) {
   }
   // Keep Camera selected so native face values apply reliably; the red ◎ is
   // removed from the captured pixels after Present.
-  timeline_.suppressViewportOverlays();
   nativeCameraApplied_ = true;
   if (controller_.isCancelled()) {
     std::lock_guard<std::mutex> lock(redrawMu_);

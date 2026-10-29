@@ -68,7 +68,9 @@ private:
   int savedOutputWidth_ = 0;
   int savedOutputHeight_ = 0;
   int savedScreenCaptureCommand_ = -1;
+  int savedInformationVisible_ = -1;
   int savedCoordinateAxisVisible_ = -1;
+  bool informationCaptureHidden_ = false;
   bool coordinateAxisCaptureHidden_ = false;
 
   static bool isDigitText(const std::wstring& s);
@@ -78,6 +80,7 @@ private:
   bool bindCameraEdits();
   bool selectCameraLightTarget(int selection);
   bool ensureCameraTargetSelected();
+  bool setInformationVisible(bool visible);
   bool setCoordinateAxisVisible(bool visible);
   bool setOutputSizeInternal(int width, int height, bool saveCurrent);
   static bool readDouble(HWND edit, double& out);

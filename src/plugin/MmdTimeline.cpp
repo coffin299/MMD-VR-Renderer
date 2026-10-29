@@ -25,6 +25,7 @@ constexpr int kOutputHeightEditId = 622;
 constexpr int kScreenCaptureOffMenuId = 243;
 constexpr int kScreenCaptureMode1MenuId = 244;
 constexpr int kScreenCaptureMode3MenuId = 246;
+constexpr int kInformationMenuId = 211;    // 表示 > 情報表示 (FPS / local labels)
 constexpr int kCoordinateAxisMenuId = 215; // 表示 > 座標軸表示
 
 struct OutputSizeDialogCtx {
@@ -493,18 +494,56 @@ bool MmdTimeline::setCoordinateAxisVisible(bool visible) {
   return true;
 }
 
+bool MmdTimeline::setInformationVisible(bool visible) {
+  if (!mmdMain_ || !IsWindow(mmdMain_)) return false;
+  if (!visible && informationCaptureHidden_) return true;
+  bool current = false;
+  if (!menuCommandChecked(mmdMain_, kInformationMenuId, current)) {
+    Diagnostics::instance().warn("MmdTimeline: MMD information-display menu not found");
+    return false;
+  }
+  if (savedInformationVisible_ < 0)
+    savedInformationVisible_ = current ? 1 : 0;
+  if (current == visible) {
+    informationCaptureHidden_ = !visible;
+    return true;
+  }
+  if (!PostMessageW(mmdMain_, WM_COMMAND, static_cast<WPARAM>(kInformationMenuId), 0)) {
+    Diagnostics::instance().warn("MmdTimeline: could not toggle MMD information display");
+    return false;
+  }
+  Diagnostics::instance().info(visible
+      ? "MmdTimeline: restored MMD information display for viewport"
+      : "MmdTimeline: disabled MMD FPS/local information for capture");
+  informationCaptureHidden_ = !visible;
+  return true;
+}
+
 bool MmdTimeline::suppressViewportOverlays() {
   if (!mmdMain_ || !IsWindow(mmdMain_)) return false;
   // MMD 9.32 renders ◎ even with the Light editor selected. Keep Camera
   // selected so face controls commit reliably; remove ◎ in capture fallback.
-  // Unlike it, the lower-right coordinate gizmo has a supported MMD toggle.
+  // The FPS/local text and lower-right coordinate gizmo have supported MMD toggles.
+  const bool informationHidden = setInformationVisible(false);
   const bool axesHidden = setCoordinateAxisVisible(false);
   // Menu toggle is posted async — give MMD a beat before the next Present.
-  if (axesHidden) Sleep(30);
-  return axesHidden;
+  if (informationHidden || axesHidden) Sleep(30);
+  return informationHidden || axesHidden;
 }
 
 void MmdTimeline::restoreEditTarget() {
+  if (savedInformationVisible_ >= 0 && mmdMain_ && IsWindow(mmdMain_)) {
+    const bool wantVisible = savedInformationVisible_ != 0;
+    bool current = false;
+    if (menuCommandChecked(mmdMain_, kInformationMenuId, current) &&
+        current != wantVisible &&
+        PostMessageW(mmdMain_, WM_COMMAND, static_cast<WPARAM>(kInformationMenuId), 0)) {
+      Diagnostics::instance().info("MmdTimeline: information-display viewport state restored");
+    }
+    savedInformationVisible_ = -1;
+    informationCaptureHidden_ = false;
+  }
+
   if (savedCoordinateAxisVisible_ >= 0 && mmdMain_ && IsWindow(mmdMain_)) {
     const bool wantVisible = savedCoordinateAxisVisible_ != 0;
     bool current = false;
