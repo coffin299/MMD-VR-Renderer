@@ -56,6 +56,7 @@ enum {
   IDC_LBL_AUDIO = 1032,
   IDC_LBL_AUDIO_HINT = 1033,
   IDC_PROJECT = 1034,
+  IDC_SEQ_FMT = 1035,
   IDC_LBL_VRMODE = 1101,
   IDC_LBL_STEREO = 1102,
   IDC_LBL_QUALITY = 1103,
@@ -80,6 +81,7 @@ enum {
   IDC_LBL_FACE_HINT = 1122,
   IDC_LBL_SAVE_WARN = 1123,
   IDC_LBL_PROJECT = 1124,
+  IDC_LBL_SEQ_FMT = 1125,
   IDC_REENCODE_HINT = 1301,
   IDC_REENCODE_LBL_PROJECT = 1302,
   IDC_REENCODE_PROJECT = 1303,
@@ -116,7 +118,8 @@ static const int kRenderPageIds[] = {
     IDC_LBL_RES, IDC_RESOLUTION, IDC_LBL_SIZE, IDC_SIZEINFO, IDC_LBL_FPS, IDC_FPS,
     IDC_LBL_THREADS, IDC_THREADS, IDC_LBL_THREADS_HINT, IDC_LBL_FACE, IDC_FACE,
     IDC_LBL_WRITE, IDC_WRITE_THREADS, IDC_LBL_QUEUE, IDC_WRITE_QUEUE, IDC_LBL_FACE_HINT,
-    IDC_LBL_IPD, IDC_IPD, IDC_LBL_FSTART, IDC_FSTART, IDC_LBL_FEND, IDC_FEND,
+    IDC_LBL_IPD, IDC_IPD, IDC_LBL_SEQ_FMT, IDC_SEQ_FMT, IDC_LBL_FSTART, IDC_FSTART, IDC_LBL_FEND,
+    IDC_FEND,
     IDC_LBL_PROJECT, IDC_PROJECT, IDC_LBL_OUT, IDC_OUTDIR, IDC_BROWSE, IDC_ENCODE,
     IDC_LBL_ENCODE_CODEC, IDC_ENCODE_CODEC, IDC_LBL_AUDIO, IDC_AUDIO, IDC_BROWSE_AUDIO,
     IDC_LBL_AUDIO_HINT, IDC_CUBEMAP, IDC_LBL_CUBEMAP_HINT, IDC_AUTOFILL, IDC_AUTOFILL_STATUS,
@@ -343,6 +346,7 @@ static void applyLabels(HWND hDlg) {
   setText(hDlg, IDC_LBL_QUEUE, s.labelWriteQueue);
   setText(hDlg, IDC_LBL_QUEUE_HINT, s.queueUnlimitedHint);
   setText(hDlg, IDC_LBL_IPD, s.labelIpd);
+  setText(hDlg, IDC_LBL_SEQ_FMT, s.labelSeqFormat);
   setText(hDlg, IDC_LBL_FSTART, s.labelFrameStart);
   setText(hDlg, IDC_LBL_FEND, s.labelFrameEnd);
   setText(hDlg, IDC_LBL_PROJECT, s.labelProjectName);
@@ -410,6 +414,9 @@ static void applyLabels(HWND hDlg) {
   int reStereoSel = (int)SendDlgItemMessageW(hDlg, IDC_REENCODE_STEREO, CB_GETCURSEL, 0, 0);
   refillCombo(hDlg, IDC_REENCODE_CODEC, codecItems, 5, reCodecSel < 0 ? (int)EncodeCodec::Auto : reCodecSel);
   refillCombo(hDlg, IDC_REENCODE_STEREO, stereoItems, 2, reStereoSel < 0 ? 1 : reStereoSel);
+  int seqSel = (int)SendDlgItemMessageW(hDlg, IDC_SEQ_FMT, CB_GETCURSEL, 0, 0);
+  const wchar_t* seqItems[] = { s.comboSeqAuto, s.comboSeqPng, s.comboSeqJpeg };
+  refillCombo(hDlg, IDC_SEQ_FMT, seqItems, 3, seqSel < 0 ? (int)SequenceFormat::Auto : seqSel);
   const int faceSel = (int)SendDlgItemMessageW(hDlg, IDC_FACE, CB_GETCURSEL, 0, 0);
   refillFaceCombo(hDlg, comboIndexToFaceSize(faceSel));
   const int writeSel = (int)SendDlgItemMessageW(hDlg, IDC_WRITE_THREADS, CB_GETCURSEL, 0, 0);
@@ -455,6 +462,7 @@ static INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM) {
     refillWriteThreadsCombo(hDlg, s.writeThreads);
     refillWriteQueueCombo(hDlg, s.writeQueueMax);
     setText(hDlg, IDC_IPD, std::to_wstring(s.ipdUnits));
+    SendDlgItemMessageW(hDlg, IDC_SEQ_FMT, CB_SETCURSEL, (int)s.sequenceFormat, 0);
     setText(hDlg, IDC_FSTART, std::to_wstring(s.frameStart));
     setText(hDlg, IDC_FEND, std::to_wstring(s.frameEnd < 0 ? s.frameStart : s.frameEnd));
     {
@@ -562,6 +570,9 @@ static INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM) {
       s.writeQueueMax = comboIndexToWriteQueue(
           (int)SendDlgItemMessageW(hDlg, IDC_WRITE_QUEUE, CB_GETCURSEL, 0, 0));
       s.ipdUnits = (float)_wtof(getText(hDlg, IDC_IPD).c_str());
+      int seqIdx = (int)SendDlgItemMessageW(hDlg, IDC_SEQ_FMT, CB_GETCURSEL, 0, 0);
+      if (seqIdx < 0 || seqIdx > (int)SequenceFormat::Jpeg) seqIdx = (int)SequenceFormat::Auto;
+      s.sequenceFormat = (SequenceFormat)seqIdx;
       s.frameStart = _wtoi(getText(hDlg, IDC_FSTART).c_str());
       s.frameEnd = _wtoi(getText(hDlg, IDC_FEND).c_str());
       s.jobName = sanitizeProjectName(getText(hDlg, IDC_PROJECT));
@@ -802,6 +813,9 @@ bool ShowRenderDialog(HWND owner, RenderSettings& settings) {
 
       CreateWindowW(L"STATIC", L"", st, 16, 254, 140, 18, hWnd, (HMENU)IDC_LBL_IPD, 0, 0);
       CreateWindowW(L"EDIT", L"", st | WS_BORDER, 170, 252, 64, 20, hWnd, (HMENU)IDC_IPD, 0, 0);
+      CreateWindowW(L"STATIC", L"", st, 250, 254, 90, 18, hWnd, (HMENU)IDC_LBL_SEQ_FMT, 0, 0);
+      CreateWindowW(L"COMBOBOX", L"", st | CBS_DROPDOWNLIST, 350, 252, 320, 200, hWnd,
+                    (HMENU)IDC_SEQ_FMT, 0, 0);
 
       CreateWindowW(L"STATIC", L"", st, 16, 278, 140, 18, hWnd, (HMENU)IDC_LBL_FSTART, 0, 0);
       CreateWindowW(L"EDIT", L"", st | WS_BORDER, 170, 276, 90, 20, hWnd, (HMENU)IDC_FSTART, 0, 0);

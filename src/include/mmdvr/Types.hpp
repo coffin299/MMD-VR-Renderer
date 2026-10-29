@@ -34,6 +34,14 @@ enum class EncodeCodec : int {
   Amf = 4      // hevc_amf → h264_amf → soft
 };
 
+// Frame sequence on disk (under outputDir\\frames).
+// Auto: JPEG q92 for large frames, PNG for smaller; resume sticks to existing files.
+enum class SequenceFormat : int {
+  Auto = 0,
+  Png = 1,
+  Jpeg = 2
+};
+
 // Equirect size as multiples of 1920×960 (≈1920×1080 at 2:1 VR aspect).
 // Stereo SBS doubles the final width.
 enum class ResolutionPreset : int {
@@ -151,11 +159,13 @@ struct RenderSettings {
   std::wstring jobName = L"mmdvr_job";
   // CPU workers for projection / convert. 0 = all logical cores (no artificial cap).
   int workerThreads = 0;
-  // Parallel PNG writers (each holds a full frame in RAM). End-user chooses how hard to push.
+  // Parallel sequence writers (each holds a full frame in RAM). End-user chooses how hard to push.
   int writeThreads = 2;
-  // Max pending PNG frames in RAM before backpressure.
+  // Max pending sequence frames in RAM before backpressure.
   // 0 = auto-cap from free RAM / frame size (never truly unlimited for huge VR frames).
   int writeQueueMax = 0;
+  // JPEG vs PNG for the frames\\ sequence (UI). Resume prefers files already on disk.
+  SequenceFormat sequenceFormat = SequenceFormat::Auto;
 
   void applyResolutionPreset() {
     resolutionSize(resolution, outputWidth, outputHeight);

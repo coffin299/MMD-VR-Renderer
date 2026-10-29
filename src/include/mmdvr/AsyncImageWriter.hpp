@@ -17,8 +17,9 @@ namespace mmdvr {
 // should pass a positive auto-capped value for large VR frames.
 class AsyncImageWriter {
 public:
-  AsyncImageWriter(std::wstring outputDir, int writeThreads = 2, int queueMax = 1)
-      : sync_(std::move(outputDir)), queueMax_(queueMax < 1 ? 1 : queueMax) {
+  AsyncImageWriter(std::wstring outputDir, int writeThreads = 2, int queueMax = 1,
+                   SequenceFormat format = SequenceFormat::Auto)
+      : sync_(std::move(outputDir), format), queueMax_(queueMax < 1 ? 1 : queueMax) {
     sync_.ensureDir();
     int n = writeThreads < 1 ? 1 : writeThreads;
     workers_.reserve((size_t)n);

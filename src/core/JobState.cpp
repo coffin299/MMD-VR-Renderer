@@ -70,7 +70,8 @@ bool JobState::save(const std::wstring& path, const JobStateData& data) {
     {"jobName", narrow(data.settings.jobName)},
     {"workerThreads", data.settings.workerThreads},
     {"writeThreads", data.settings.writeThreads},
-    {"writeQueueMax", data.settings.writeQueueMax}
+    {"writeQueueMax", data.settings.writeQueueMax},
+    {"sequenceFormat", (int)data.settings.sequenceFormat}
   };
   std::ofstream f(narrow(path), std::ios::binary);
   if (!f) {
@@ -121,6 +122,8 @@ bool JobState::load(const std::wstring& path, JobStateData& out) {
     out.settings.workerThreads = s.value("workerThreads", 0);
     out.settings.writeThreads = s.value("writeThreads", 2);
     out.settings.writeQueueMax = s.value("writeQueueMax", 0);
+    out.settings.sequenceFormat =
+        (SequenceFormat)s.value("sequenceFormat", (int)SequenceFormat::Auto);
   }
   return true;
 }

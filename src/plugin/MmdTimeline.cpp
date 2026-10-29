@@ -499,7 +499,8 @@ bool MmdTimeline::suppressViewportOverlays() {
   // selected so face controls commit reliably; remove ◎ in capture fallback.
   // Unlike it, the lower-right coordinate gizmo has a supported MMD toggle.
   const bool axesHidden = setCoordinateAxisVisible(false);
-  Diagnostics::instance().info("MmdTimeline: camera target retained for face capture");
+  // Menu toggle is posted async — give MMD a beat before the next Present.
+  if (axesHidden) Sleep(30);
   return axesHidden;
 }
 

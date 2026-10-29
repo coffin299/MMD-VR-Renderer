@@ -78,11 +78,20 @@ bool ImageSequenceWriter::preferCompactJpeg(int width, int height) {
   return px >= 3840ll * 2160ll;
 }
 
-const wchar_t* ImageSequenceWriter::frameExtension(int width, int height) {
-  return preferCompactJpeg(width, height) ? L".jpg" : L".png";
+const wchar_t* ImageSequenceWriter::frameExtension(int width, int height, SequenceFormat format) {
+  switch (format) {
+  case SequenceFormat::Png:
+    return L".png";
+  case SequenceFormat::Jpeg:
+    return L".jpg";
+  case SequenceFormat::Auto:
+  default:
+    return preferCompactJpeg(width, height) ? L".jpg" : L".png";
+  }
 }
 
-ImageSequenceWriter::ImageSequenceWriter(std::wstring outputDir) : outputDir_(std::move(outputDir)) {}
+ImageSequenceWriter::ImageSequenceWriter(std::wstring outputDir, SequenceFormat format)
+    : outputDir_(std::move(outputDir)), format_(format) {}
 
 bool ImageSequenceWriter::ensureDir() const {
   std::error_code ec;
@@ -101,7 +110,7 @@ std::wstring ImageSequenceWriter::framePath(int frameIndex, int width, int heigh
   ss << outputDir_ << L"\\frame_" << std::setw(6) << std::setfill(L'0') << frameIndex;
   if (suffix && *suffix) ss << suffix;
   if (width > 0 && height > 0)
-    ss << frameExtension(width, height);
+    ss << frameExtension(width, height, format_);
   else
     ss << L".png";
   return ss.str();
@@ -154,13 +163,23 @@ bool ImageSequenceWriter::writeJpeg(ImageBuffer& image, const std::wstring& path
   return true;
 }
 
+static std::wstring makeFramePath(const std::wstring& dir, int frameIndex, const wchar_t* suffix,
+                                  const wchar_t* ext) {
+  std::wstringstream ss;
+  ss << dir << L"\\frame_" << std::setw(6) << std::setfill(L'0') << frameIndex;
+  if (suffix && *suffix) ss << suffix;
+  ss << ext;
+  return ss.str();
+}
+
 bool ImageSequenceWriter::writeFrame(ImageBuffer& image, int frameIndex, const wchar_t* suffix) const {
-  // Debug dumps always PNG. For the main sequence: if this folder already has
-  // frame_*.png (resume of an older job), keep PNG so FFmpeg sees one pattern.
-  // Otherwise large frames use JPEG q92 (~50MB target).
+  // Debug dumps always PNG. Resume: stick to whatever extension already exists in
+  // the folder so FFmpeg sees one pattern. New jobs honor SequenceFormat.
   const bool debugDump = suffix && *suffix;
-  bool compact = !debugDump && preferCompactJpeg(image.width, image.height);
-  if (compact) {
+  bool useJpeg = false;
+  if (!debugDump) {
+    enum class Existing { None, Png, Jpg };
+    Existing existing = Existing::None;
     std::error_code ec;
     for (auto& ent : fs::directory_iterator(outputDir_, ec)) {
       if (!ent.is_regular_file(ec)) continue;
@@ -168,15 +187,35 @@ bool ImageSequenceWriter::writeFrame(ImageBuffer& image, int frameIndex, const w
       if (name.rfind(L"frame_", 0) != 0) continue;
       auto ext = ent.path().extension().wstring();
       if (_wcsicmp(ext.c_str(), L".png") == 0) {
-        compact = false; // continue existing PNG job
+        existing = Existing::Png;
         break;
       }
-      if (_wcsicmp(ext.c_str(), L".jpg") == 0 || _wcsicmp(ext.c_str(), L".jpeg") == 0)
-        break; // already a JPEG job
+      if (_wcsicmp(ext.c_str(), L".jpg") == 0 || _wcsicmp(ext.c_str(), L".jpeg") == 0) {
+        existing = Existing::Jpg;
+        break;
+      }
+    }
+    if (existing == Existing::Png)
+      useJpeg = false;
+    else if (existing == Existing::Jpg)
+      useJpeg = true;
+    else {
+      switch (format_) {
+      case SequenceFormat::Png:
+        useJpeg = false;
+        break;
+      case SequenceFormat::Jpeg:
+        useJpeg = true;
+        break;
+      case SequenceFormat::Auto:
+      default:
+        useJpeg = preferCompactJpeg(image.width, image.height);
+        break;
+      }
     }
   }
-  if (compact) {
-    const auto path = framePath(frameIndex, image.width, image.height, suffix);
+  if (useJpeg) {
+    const auto path = makeFramePath(outputDir_, frameIndex, suffix, L".jpg");
     static bool logged = false;
     if (!logged) {
       logged = true;
@@ -186,7 +225,7 @@ bool ImageSequenceWriter::writeFrame(ImageBuffer& image, int frameIndex, const w
     }
     return writeJpeg(image, path, compactJpegQuality());
   }
-  return writePng(image, framePath(frameIndex, image.width, image.height, suffix));
+  return writePng(image, makeFramePath(outputDir_, frameIndex, suffix, L".png"));
 }
 
 bool ImageSequenceWriter::writePng(const ImageBuffer& image, const std::wstring& path) const {

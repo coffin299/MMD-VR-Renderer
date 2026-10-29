@@ -197,9 +197,10 @@ void PluginHost::stagePreOverlaySource(
   if (!device || !source || device != device_) return;
   {
     std::lock_guard<std::mutex> lock(redrawMu_);
-    // The first Present after camera edits is deliberately discarded. Its
-    // screen-capture copy is likewise stale and must not become a cubemap face.
-    if (!wantCapture_ || skipCaptures_ > 0) return;
+    // Stage even while skipCaptures_ > 0: the discarded first Present often
+    // carries MMD's high-res screen-capture StretchRect. Blocking staging there
+    // forced Present fallback (~772² + editor UI).
+    if (!wantCapture_) return;
   }
   // Do not recursively capture our own staging/readback surfaces.
   if (capture_.ownsSurface(source)) return;
@@ -208,34 +209,52 @@ void PluginHost::stagePreOverlaySource(
   if (FAILED(source->GetDesc(&desc)) || desc.Width == 0 || desc.Height == 0)
     return;
 
-  // Prefer the square we set via MMD「出力サイズ」(mmdOutputFaceSize_). Matching
-  // only the window backbuffer caused 8K jobs to silently stage ~772².
+  // Prefer the square we set via MMD「出力サイズ」(mmdOutputFaceSize_).
   const auto settings = controller_.settings();
   const int faceTarget =
       (settings.cubemapFaces && mmdOutputSizeConfigured_ && mmdOutputFaceSize_ > 0)
           ? mmdOutputFaceSize_
           : 0;
 
-  auto scoreCandidate = [&](int w, int h) -> int {
+  const int w = static_cast<int>(desc.Width);
+  const int h = static_cast<int>(desc.Height);
+  auto scoreCandidate = [&](int cw, int ch) -> int {
     if (faceTarget > 0) {
-      const int tol = (std::max)(32, faceTarget / 16);
-      if (std::abs(w - faceTarget) <= tol && std::abs(h - faceTarget) <= tol)
-        return 100000 + w; // true cubemap face render target
+      const int tol = (std::max)(64, faceTarget / 8);
+      // Exact / near face-size square (primary).
+      if (std::abs(cw - faceTarget) <= tol && std::abs(ch - faceTarget) <= tol)
+        return 100000 + cw;
+      // Large square close to target (e.g. 7680 when asking 8192).
+      if (cw == ch && cw >= faceTarget * 3 / 4 && cw <= faceTarget + tol)
+        return 50000 + cw;
+      // Any large square (≥2048): better than window fallback for VR faces.
+      if (cw == ch && cw >= 2048)
+        return 20000 + cw;
+      return -1; // ignore window-sized while face output size is configured
     }
     if (bbW_ > 0 && bbH_ > 0) {
       const int toleranceW = (std::max)(32, bbW_ / 8);
       const int toleranceH = (std::max)(32, bbH_ / 8);
-      if (std::abs(w - bbW_) <= toleranceW && std::abs(h - bbH_) <= toleranceH)
-        return 1000 + w; // window / presentation fallback
+      if (std::abs(cw - bbW_) <= toleranceW && std::abs(ch - bbH_) <= toleranceH)
+        return 1000 + cw;
     }
     return -1;
   };
 
-  const int score = scoreCandidate(static_cast<int>(desc.Width), static_cast<int>(desc.Height));
-  if (score < 0) return;
-  // Once cubemap output size is live, ignore window-sized candidates so we
-  // never thrash a face-sized staged RT down to 1920 and back.
-  if (faceTarget > 0 && score < 100000) return;
+  const int score = scoreCandidate(w, h);
+  if (score < 0) {
+    // One-shot diagnostics: why face-sized staging never fires.
+    static int s_rejectLog = 0;
+    if (faceTarget > 0 && s_rejectLog < 8 && w >= 256 && h >= 256) {
+      ++s_rejectLog;
+      char msg[160];
+      std::snprintf(msg, sizeof(msg),
+                    "Pre-overlay reject %s %dx%d (want face~%d)",
+                    operation ? operation : "?", w, h, faceTarget);
+      Diagnostics::instance().info(msg);
+    }
+    return;
+  }
 
   if (capture_.hasStagedSurface()) {
     int sw = 0, sh = 0;
@@ -243,17 +262,17 @@ void PluginHost::stagePreOverlaySource(
       return; // keep equal-or-better staged copy
   }
 
-  const bool okStage = (faceTarget > 0)
+  // Stage at source size when we accepted a near-face square; only force
+  // exact faceTarget for the top score band.
+  const bool okStage = (score >= 100000)
                            ? capture_.stageSurface(source, faceTarget, faceTarget)
                            : capture_.stageSurface(source);
   if (!okStage) return;
 
-  // Log once per job (or first face-sized upgrade). Per-face logging opens the
-  // log file thousands of times and hides real errors on long 8K runs.
   bool logCandidate = false;
   {
     std::lock_guard<std::mutex> lock(redrawMu_);
-    if (!preOverlayCandidateLogged_) {
+    if (!preOverlayCandidateLogged_ || score >= 100000) {
       preOverlayCandidateLogged_ = true;
       logCandidate = true;
     }
@@ -261,11 +280,10 @@ void PluginHost::stagePreOverlaySource(
   if (logCandidate) {
     char msg[192];
     std::snprintf(msg, sizeof(msg),
-                  "Pre-overlay source staged from %s: %ux%u fmt=%u%s",
+                  "Pre-overlay source staged from %s: %ux%u fmt=%u score=%d",
                   operation ? operation : "?",
                   static_cast<unsigned>(desc.Width), static_cast<unsigned>(desc.Height),
-                  static_cast<unsigned>(desc.Format),
-                  score >= 100000 ? " (face-sized)" : " (backbuffer-sized)");
+                  static_cast<unsigned>(desc.Format), score);
     Diagnostics::instance().info(msg);
   }
 }
@@ -382,6 +400,13 @@ void PluginHost::onSetRenderTarget(IDirect3DSurface9* rt) {
   const int tolW = bbW_ / 10 + 8;
   const int tolH = bbH_ / 10 + 8;
   onMainRt_ = (std::abs((int)d.Width - bbW_) <= tolW) && (std::abs((int)d.Height - bbH_) <= tolH);
+
+  // ray-mmd / MMD may never StretchRect the 出力サイズ RT; catch it on SetRT.
+  if (device_ && mmdOutputFaceSize_ > 0) {
+    const int side = static_cast<int>((std::min)(d.Width, d.Height));
+    if (d.Width == d.Height && side >= 2048)
+      stagePreOverlaySource(device_, rt, "SetRenderTarget");
+  }
 }
 
 void PluginHost::onBeginScene(IDirect3DDevice9* device) {
@@ -615,6 +640,13 @@ bool PluginHost::seekAnimationFrame(int frameIndex) {
       mmdOutputSizeConfigured_ = true;
       mmdOutputFaceSize_ = face;
       refreshBackbufferSize();
+      // Let Reset settle and hide editor gizmos before the first face Present.
+      timeline_.suppressViewportOverlays();
+      for (int i = 0; i < 4 && mmdHwnd_; ++i) {
+        InvalidateRect(mmdHwnd_, nullptr, FALSE);
+        PostMessageW(mmdHwnd_, WM_PAINT, 0, 0);
+        Sleep(40);
+      }
       Diagnostics::instance().info(
           "seekAnimationFrame: MMD output size OK — expect face-sized captures");
     } else {
@@ -632,6 +664,8 @@ bool PluginHost::seekAnimationFrame(int frameIndex) {
     Diagnostics::instance().warn(
         "seekAnimationFrame: MMD screen-capture mode unavailable; using Present fallback");
   }
+  // Axes hide is async (menu WM_COMMAND); reinforce each seek.
+  timeline_.suppressViewportOverlays();
   if (!timeline_.seekFrame(frameIndex)) return false;
   if (controller_.settings().cubemapFaces) {
     if (!timeline_.readCamera(nativeCameraBase_)) {
@@ -743,9 +777,10 @@ bool PluginHost::renderView(const CameraState& cam, ImageBuffer& out) {
     std::lock_guard<std::mutex> lock(redrawMu_);
     captureReady_ = false;
     wantCapture_ = true;
-    // Native UI camera is applied + short Sleep before this wait; the next
-    // Present is already the face we want. skip=1 doubled every face Present.
-    skipCaptures_ = 0;
+    // Discard one Present after camera UI edits so ray-mmd/MME finish evaluating
+    // (skip=0 caused soft/wrong faces and broken right-eye PosZ). Staging still
+    // runs during the skipped Present — see stagePreOverlaySource.
+    skipCaptures_ = 1;
     pendingCam_ = cam;
     preOverlayCandidateLogged_ = false;
   }

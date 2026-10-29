@@ -527,7 +527,8 @@ bool RenderController::processAnimationFrame(int frameIndex) {
 
   if (!asyncWriter_) {
     const int q = resolvePngQueueMax(s);
-    asyncWriter_ = std::make_unique<AsyncImageWriter>(s.pngSequenceDir(), s.writeThreads, q);
+    asyncWriter_ = std::make_unique<AsyncImageWriter>(s.pngSequenceDir(), s.writeThreads, q,
+                                                      s.sequenceFormat);
   }
   asyncWriter_->enqueue(std::move(composed), frameIndex);
   composed = {};
@@ -590,7 +591,8 @@ bool RenderController::start(ProgressCallback cb) {
   Parallel::setThreadLimit(s.workerThreads);
   Parallel::setCancelFlag(&cancel_);
   const int pngQueue = resolvePngQueueMax(s);
-  asyncWriter_ = std::make_unique<AsyncImageWriter>(s.pngSequenceDir(), s.writeThreads, pngQueue);
+  asyncWriter_ = std::make_unique<AsyncImageWriter>(s.pngSequenceDir(), s.writeThreads, pngQueue,
+                                                    s.sequenceFormat);
   const size_t frameBytes = estimateComposedRgbaBytes(s);
   Diagnostics::instance().info(
       std::string("mode=") + (s.cubemapFaces ? "cubemap(experimental)" : "live-camera(safe)") +

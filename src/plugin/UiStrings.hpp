@@ -43,6 +43,10 @@ struct Bundle {
   const wchar_t* faceHint;
   const wchar_t* labelWriteThreads;
   const wchar_t* labelWriteQueue;
+  const wchar_t* labelSeqFormat;
+  const wchar_t* comboSeqAuto;
+  const wchar_t* comboSeqPng;
+  const wchar_t* comboSeqJpeg;
   const wchar_t* labelFrameStart;
   const wchar_t* labelFrameEnd;
   const wchar_t* labelProjectName;
