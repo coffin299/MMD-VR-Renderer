@@ -167,11 +167,15 @@ void removeMmdLocalTransformGizmo(ImageBuffer& image) {
   if (redCount < 6 || greenCount < 6 || blueCount < 6) return;
 
   const std::vector<uint8_t> detected = mask;
+  // The glyphs have dark/white outlines several pixels beyond their colored
+  // cores. A small dilation left those outlines behind; expand enough to cover
+  // each complete Local XYZ icon before scene-pixel reconstruction.
+  constexpr int kGizmoOutlineRadius = 8;
   for (int y = top; y < image.height; ++y) {
     for (int x = left; x < image.width; ++x) {
       if (!detected[roi(x, y)]) continue;
-      for (int dy = -2; dy <= 2; ++dy) {
-        for (int dx = -2; dx <= 2; ++dx) {
+      for (int dy = -kGizmoOutlineRadius; dy <= kGizmoOutlineRadius; ++dy) {
+        for (int dx = -kGizmoOutlineRadius; dx <= kGizmoOutlineRadius; ++dx) {
           const int nx = x + dx, ny = y + dy;
           if (nx >= left && nx < image.width && ny >= top && ny < image.height)
             mask[roi(nx, ny)] = 1;
