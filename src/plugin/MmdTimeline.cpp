@@ -1,4 +1,5 @@
 #include "MmdTimeline.hpp"
+#include "PluginHost.hpp"
 #include "mmdvr/Diagnostics.hpp"
 #include <algorithm>
 #include <array>
@@ -261,7 +262,7 @@ bool MmdTimeline::writeDouble(HWND edit, double value) {
   return SetWindowTextW(edit, text) != FALSE;
 }
 
-void MmdTimeline::notifyEditChanged(HWND edit) {
+void MmdTimeline::notifyEditChanged(HWND edit, bool commitKey) {
   if (!edit) return;
   const int id = GetDlgCtrlID(edit);
   HWND parent = GetParent(edit);
@@ -269,9 +270,9 @@ void MmdTimeline::notifyEditChanged(HWND edit) {
   SendMessageW(edit, EM_SETMODIFY, TRUE, 0);
   SendMessageW(parent, WM_COMMAND, MAKEWPARAM(id, EN_CHANGE), reinterpret_cast<LPARAM>(edit));
   SendMessageW(parent, WM_COMMAND, MAKEWPARAM(id, EN_KILLFOCUS), reinterpret_cast<LPARAM>(edit));
-  // MMD commits camera edits when Return is pressed. Avoid WM_CHAR because a
-  // standard Edit control beeps for it, but keep the key transition that its
-  // native camera-control handler consumes.
+  // Return commits the camera and makes MMD/ray redraw. Once per face, not once
+  // per field — seven commits were a full ray frame each (~30s / animation frame).
+  if (!commitKey) return;
   SendMessageW(edit, WM_KEYDOWN, VK_RETURN, 0);
   SendMessageW(edit, WM_KEYUP, VK_RETURN, 0);
 }
@@ -298,21 +299,22 @@ bool MmdTimeline::applyCamera(const MmdCameraUiState& state) {
     return false;
   const std::array<double, 7> values = {
       state.x, state.y, state.z, state.rotX, state.rotY, state.rotZ, state.distance};
+  // Field notifications update MMD's camera struct. Ignore any Present they
+  // cause; the single Return below is the frame we capture.
+  PluginHost::instance().deferCapturePresents(true);
   for (size_t i = 0; i < cameraEdits_.size(); ++i) {
-    if (!writeDouble(cameraEdits_[i], values[i])) return false;
-    // MMD updates the camera state in the edit notification handler. Commit
-    // each field immediately, exactly as the native UI does while the user
-    // changes a value. Deferring every notification until after all seven
-    // WM_SETTEXT calls caused its pitch channel to remain stale for ray-mmd.
-    notifyEditChanged(cameraEdits_[i]);
+    if (!writeDouble(cameraEdits_[i], values[i])) {
+      PluginHost::instance().deferCapturePresents(false);
+      return false;
+    }
+    const bool last = i + 1 == cameraEdits_.size();
+    if (last) PluginHost::instance().deferCapturePresents(false);
+    notifyEditChanged(cameraEdits_[i], last);
   }
   if (mmdMain_) {
     InvalidateRect(mmdMain_, nullptr, FALSE);
     PostMessageW(mmdMain_, WM_PAINT, 0, 0);
   }
-  // Let MMD consume edit notifications before Present. Was 45ms×faces/frame
-  // (~0.5s/stereo frame idle); 8ms is enough once skipCaptures is 0.
-  Sleep(8);
   return true;
 }
 
@@ -635,6 +637,18 @@ bool MmdTimeline::applyCameraFace(
   state.x = base.x + baseOrbit.x - faceOrbit.x + eyeOx;
   state.y = base.y + baseOrbit.y - faceOrbit.y + eyeOy;
   state.z = base.z + baseOrbit.z - faceOrbit.z + eyeOz;
+  {
+    static int s_faceLogs = 0;
+    if (s_faceLogs < 12) {
+      ++s_faceLogs;
+      char msg[192];
+      std::snprintf(msg, sizeof(msg),
+                    "camera face %d rotY=%.2f pos=(%.2f,%.2f,%.2f) dist=%.2f",
+                    static_cast<int>(desired.cubeFace), state.rotY, state.x, state.y, state.z,
+                    state.distance);
+      Diagnostics::instance().info(msg);
+    }
+  }
   if (!applyCamera(state)) return false;
 
   // Per-face readback logs were drowning the job log (10×/frame × thousands).

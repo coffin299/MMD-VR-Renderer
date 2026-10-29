@@ -69,6 +69,8 @@ public:
   void restoreSceneCamera() override;
   void trimCaptureResources() override;
 
+  // While set, Presents still draw but are not stored as cubemap faces.
+  void deferCapturePresents(bool defer);
   // UI-thread safe: drop capture request and wake renderView waiters only.
   void interruptCaptureWait(const char* reason);
   // Job-worker / device-reset: restore MMD camera, drop hooks, release pool.
@@ -98,6 +100,7 @@ private:
   std::mutex redrawMu_;
   std::condition_variable redrawCv_;
   bool wantCapture_ = false;
+  std::atomic<bool> captureDeferPresents_{false};
   bool captureReady_ = false;
   std::atomic<bool> wantEvict_{false};
   // Armed by job worker; executed on Present (D3D thread) only.

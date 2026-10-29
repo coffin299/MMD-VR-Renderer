@@ -322,6 +322,11 @@ void PluginHost::setCaptureArmed(bool armed) {
   SetMmdLocalGizmoSuppress(armed);
 }
 
+void PluginHost::deferCapturePresents(bool defer) {
+  captureDeferPresents_.store(defer, std::memory_order_release);
+  if (defer) capture_.clearStagedSurface();
+}
+
 bool PluginHost::expandNativeCaptureViewport(D3DVIEWPORT9& vp) const {
   if (!nativeCaptureSurfaceActive() || mmdOutputFaceSize_ <= 0) return false;
   if (bbW_ <= 0 || bbH_ <= 0) return false;
@@ -694,6 +699,7 @@ void PluginHost::onBeforeStretchRect(
 
 void PluginHost::stagePreOverlaySource(
     IDirect3DDevice9* device, IDirect3DSurface9* source, const char* operation) {
+  if (captureDeferPresents_.load(std::memory_order_acquire)) return;
   if (!device || !source || device != device_) return;
   {
     std::lock_guard<std::mutex> lock(redrawMu_);
@@ -817,6 +823,7 @@ void PluginHost::restoreObservedTransforms(IDirect3DDevice9* device) {
 }
 
 void PluginHost::interruptCaptureWait(const char* reason) {
+  captureDeferPresents_.store(false, std::memory_order_release);
   {
     std::lock_guard<std::mutex> lock(redrawMu_);
     setCaptureArmed(false);
@@ -1085,6 +1092,10 @@ void PluginHost::onAfterPresent(IDirect3DDevice9* device) {
 
 void PluginHost::onBeforePresent(IDirect3DDevice9* device) {
   if (device) device_ = device;
+  if (captureDeferPresents_.load(std::memory_order_acquire)) {
+    capture_.clearStagedSurface();
+    return;
+  }
   onMainRt_ = true;
 
   if (wantReleasePool_.exchange(false))

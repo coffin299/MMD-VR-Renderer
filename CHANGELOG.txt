@@ -10,6 +10,8 @@ GitHub Release Full Changelog → this file on the release tag.
 --------------------------------------------------------------------------------
 
 ### 修正 / Fixed
+- JA: **1フレームが約30秒・キャラが方位ごとに重複**: カメラ7項目の確定ごとに ray を描き直していたのを、面あたり1回の確定にまとめた
+  EN: **~30s per frame and the character repeated on every cubemap direction**: commit the camera once per face instead of redrawing ray for each of the seven fields
 - JA: **録画中の ray-mmd が細い帯になる**: ウィンドウ解像度のビューポートを面サイズへ広げ、GetViewport の偽装をやめた。面ごとに捨てていたフレームと余分な再描画も削減
   EN: **ray-mmd renders as thin bands during capture**: expand the window viewport to the face size and stop lying about GetViewport; drop the discarded frame and extra repaints per face
 - JA: **エンコ後の再録画でログなしクラッシュ**: 解除時の PostDeviceReset を廃止。ゲート/RT はソフト復帰＋ビューポート微調整、エンコード前に戻す

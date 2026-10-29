@@ -85,7 +85,7 @@ private:
   bool setOutputSizeInternal(int width, int height, bool saveCurrent);
   static bool readDouble(HWND edit, double& out);
   static bool writeDouble(HWND edit, double value);
-  static void notifyEditChanged(HWND edit);
+  static void notifyEditChanged(HWND edit, bool commitKey);
 };
 
 } // namespace mmdvr
