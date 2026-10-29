@@ -739,7 +739,11 @@ void PluginHost::onBeforePresent(IDirect3DDevice9* device) {
     std::lock_guard<std::mutex> lock(redrawMu_);
     if (ok) pendingCapture_ = std::move(img);
     captureReady_ = ok;
-    setCaptureArmed(false);
+    // Stop this request before another Present can consume it, but keep the
+    // Local XYZ draw hook armed until the worker has consumed this face.
+    // Otherwise an editor repaint between consecutive cubemap faces redraws
+    // the gizmo into the next face's staged high-resolution source.
+    wantCapture_ = false;
     redrawCv_.notify_all();
   }
   // Native camera capture leaves MMD/MME/ray-mmd state untouched. Restoring

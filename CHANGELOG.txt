@@ -38,6 +38,8 @@ GitHub Release Full Changelog → this file on the release tag.
   EN: 8K storage warnings in the resolution combo, size line, and notes (JA+EN)
 
 ### 修正 / Fixed
+- JA: **最初の面だけ Local XYZ が消え、後続の面へ再混入する**: 面キャプチャ完了直後ではなく、ワーカーが面を受け取るまで操作ギズモ抑制を維持
+  EN: **Local XYZ disappeared only on the first face then leaked into later faces**: keep gizmo suppression active until the worker consumes each captured face
 - JA: **8K の最初の面で Present 待機が10秒で失敗する**: 8192² は最大60秒、4K級は最大30秒まで MMD/MME の高解像度描画完了を待機
   EN: **First 8K face timed out after 10 seconds waiting for Present**: allow up to 60 seconds for 8192² and 30 seconds for 4K-class MMD/MME rendering
 - JA: **右下の Local XYZ 操作ギズモがキャプチャに残る**: MMD 9.32 のUI本体を止めず、パネル描画リーフと `local`／6個の `X/Y/Z` テキスト描画だけをキャプチャ中にスキップ（画素マスクは保険）
