@@ -38,6 +38,12 @@ GitHub Release Full Changelog → this file on the release tag.
   EN: 8K storage warnings in the resolution combo, size line, and notes (JA+EN)
 
 ### 修正 / Fixed
+- JA: **ネイティブ8K Reset直後にMMEが壊れて落ちる**: FrameDriver中のPostDeviceResetをやめ、Present直前にフック済みMMEデバイス経由でResetするよう変更
+  EN: **MME broke and MMD crashed right after native 8K Reset**: stop PostDeviceReset inside FrameDriver; Reset through the hooked MME device just before Present
+- JA: **ネイティブ8K初期化中にMMDが落ちる／ジョブが早期中止する**: 高解像度RTの生成・bind・viewport更新が完了する前に開始成功を通知していた競合を解消
+  EN: **MMD crashed or the job aborted during native 8K startup**: wait to report activation until high-resolution RT creation, binding, and viewport update have completed
+- JA: **「8K」なのに 772² の画面を拡大していた**: 出力サイズダイアログだけに頼らず、MMD 9.32 のAVI録画用ネイティブ高解像度RT生成・Reset経路を使って完成カラー面を取得（AVIファイルは作成しない）。面サイズ未満の入力は拡大せずジョブを拒否
+  EN: **“8K” was upscaling the 772² viewport**: use MMD 9.32’s native AVI-recording high-resolution RT/reset path to read the completed color surface without creating an AVI; reject undersized inputs instead of upscaling
 - JA: **右下の Local XYZ 操作ギズモがキャプチャに残る**: MikuDanceStudio 移植知見どおりスプライト帯は `playbackActive` が 0 のときだけ出る。状態を先行変更せず、実際のスプライト生成関数内でだけゲートを立てて描画自体を止める（画素マスクは保険）
   EN: **Lower-right Local XYZ gizmo still in captures**: per MikuDanceStudio, the sprite strip draws only when `playbackActive` is 0; gate it inside the actual sprite producer instead of changing state ahead of the paint (pixel mask kept as fallback)
 - JA: **最初の面だけ Local XYZ が消え、後続の面へ再混入する**: 面キャプチャ完了直後ではなく、ワーカーが面を受け取るまで操作ギズモ抑制を維持

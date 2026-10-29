@@ -53,10 +53,10 @@ static int g_presentDepth = 0;
 static std::atomic<bool> g_transformOverride{false};
 static std::atomic<bool> g_suppressMmdLocalGizmo{false};
 
-// MikuDanceStudio identifies this exact MMD 9.32 x64 function as
-// PrepareFrameSpriteOverlay. Local XYZ is appended only when
-// app->playbackActive (== +0x368) is 0. Gate it at this function, rather than
-// writing the state ahead of a UI paint that may reset it.
+// MikuDanceStudio identifies this exact MMD 9.32 x64 function as FrameDriver.
+// It reads app->playbackActive (== +0x368) at frame start; the Local XYZ
+// sprite strip is omitted on its playback path. Gating it here also provides
+// a safe UI/D3D-thread point for native capture-target transitions.
 constexpr uintptr_t kMmdPrepareSpriteOverlayRva = 0x274F0;
 constexpr uintptr_t kMmdPlaybackActiveOff = 0x368;
 constexpr unsigned char kMmdPrepareSpriteOverlaySig[] = {
@@ -76,6 +76,7 @@ void SetMmdLocalGizmoSuppress(bool on) {
 }
 
 static void Hook_MmdPrepareSpriteOverlay(std::uint8_t* app) {
+  PluginHost::instance().onMmdAppObserved(app);
   if (!app || !g_suppressMmdLocalGizmo.load(std::memory_order_acquire)) {
     g_MmdPrepareSpriteOverlay(app);
     return;

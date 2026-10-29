@@ -5,6 +5,7 @@
 #include <d3d9.h>
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -19,6 +20,9 @@ public:
   void onDeviceCreated(IDirect3DDevice9* device);
   void onDeviceReset();
   void onBeforePresent(IDirect3DDevice9* device);
+  // Observed in MMD's native sprite producer on the D3D thread. This is the
+  // authoritative app instance used by its recorder/reset routines.
+  void onMmdAppObserved(void* app);
   // Called immediately before an application GetRenderTargetData call. MMD's
   // screen-capture copy occurs before it draws editor overlays.
   void onBeforeGetRenderTargetData(IDirect3DDevice9* device, IDirect3DSurface9* source);
@@ -62,6 +66,9 @@ private:
   PluginHost() = default;
   void restoreObservedTransforms(IDirect3DDevice9* device);
   void applyCaptureIsolateFromEnv();
+  bool activateNativeCaptureSurface();
+  void restoreNativeCaptureSurface();
+  void processNativeCaptureSurfaceRequests();
 
   RenderController controller_;
   D3D9CaptureBackend capture_;
@@ -81,6 +88,27 @@ private:
   std::atomic<bool> wantEvict_{false};
   // Armed by job worker; executed on Present (D3D thread) only.
   std::atomic<bool> wantReleasePool_{false};
+  // 0=idle, 1=activation requested, 2=activation in progress,
+  // 3=active, -1=activation failed.
+  std::atomic<int> nativeCaptureState_{0};
+  std::atomic<int> nativeCaptureFaceSize_{0};
+  std::atomic<bool> nativeCaptureRestoreRequested_{false};
+  std::atomic<bool> nativeCaptureResetInProgress_{false};
+  std::atomic<void*> mmdApp_{nullptr};
+  HWND nativeCaptureWindow_ = nullptr;
+  struct NativeCaptureRestoreState {
+    void* app = nullptr;
+    void* renderer = nullptr;
+    IDirect3DDevice9* device = nullptr;
+    std::uint32_t outputWidth = 0;
+    std::uint32_t outputHeight = 0;
+    std::uint32_t screenWidth = 0;
+    std::uint32_t screenHeight = 0;
+    std::uint32_t backbufferWidth = 0;
+    std::uint32_t backbufferHeight = 0;
+    std::uint8_t resetPending = 0;
+    void* recordingWindow = nullptr;
+  } nativeCaptureRestore_{};
   bool preOverlayCandidateLogged_ = false;
   ImageBuffer pendingCapture_;
   CameraState pendingCam_{};
