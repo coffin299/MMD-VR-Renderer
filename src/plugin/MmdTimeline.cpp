@@ -299,8 +299,8 @@ bool MmdTimeline::applyCamera(const MmdCameraUiState& state) {
     return false;
   const std::array<double, 7> values = {
       state.x, state.y, state.z, state.rotX, state.rotY, state.rotZ, state.distance};
-  // Field notifications update MMD's camera struct. Ignore any Present they
-  // cause; the single Return below is the frame we capture.
+  // Each Return is MMD's own camera commit. Intermediate redraws are not
+  // captured; the last Return is the frame ray-mmd has fully evaluated.
   PluginHost::instance().deferCapturePresents(true);
   for (size_t i = 0; i < cameraEdits_.size(); ++i) {
     if (!writeDouble(cameraEdits_[i], values[i])) {
@@ -309,7 +309,7 @@ bool MmdTimeline::applyCamera(const MmdCameraUiState& state) {
     }
     const bool last = i + 1 == cameraEdits_.size();
     if (last) PluginHost::instance().deferCapturePresents(false);
-    notifyEditChanged(cameraEdits_[i], last);
+    notifyEditChanged(cameraEdits_[i], true);
   }
   if (mmdMain_) {
     InvalidateRect(mmdMain_, nullptr, FALSE);

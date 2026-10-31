@@ -43,7 +43,7 @@ The main artifact is `d3d9_mmdvr.dll` (also copied as `d3d9.dll`).
 ## 3. Per-frame pipeline (cubemap ON, default)
 
 1. Seek MMD frame Edit → evaluate pose  
-2. Per eye: before BeginScene, apply our 90° view once on MMD's own frame (no second render target). ray-mmd's later matrices are left alone. Capture the presented frame; face size is the view's short side  
+2. Per eye: MMD's output size is set to a square (4096 for 4K). Each view only commits MMD's camera fields. Capture the presented frame. VR180 is 5 views, VR360 is 6  
 3. Stitch to equirect (VR180 = forward hemisphere); SBS if stereo  
 4. Write PNG + `job.json`  
 5. After job: FFmpeg MP4, optional AAC from WAV, Spherical UUID inject  

@@ -65,11 +65,12 @@ inline void resolutionSize(ResolutionPreset p, int& outW, int& outH) {
 inline int suggestedFaceSize(ResolutionPreset p, QualityPreset q) {
   int base = 1024;
   switch (p) {
-  case ResolutionPreset::Res2K: base = 1024; break;
-  case ResolutionPreset::Res3K: base = 1536; break;
-  case ResolutionPreset::Res4K: base = 2048; break;
+  // Square MMD output size (short side). 4K → 4096, 8K → 8192.
+  case ResolutionPreset::Res2K: base = 2048; break;
+  case ResolutionPreset::Res3K: base = 3072; break;
+  case ResolutionPreset::Res4K: base = 4096; break;
   case ResolutionPreset::Res8K:
-  default:                      base = 4096; break;
+  default:                      base = 8192; break;
   }
   if (q == QualityPreset::Balanced) base = (base * 3) / 4;
   if (q == QualityPreset::Fast) base = base / 2;

@@ -728,9 +728,9 @@ void PluginHost::onBeforeStretchRect(
 
 void PluginHost::stagePreOverlaySource(
     IDirect3DDevice9* device, IDirect3DSurface9* source, const char* operation) {
-  // View-effect frames are read from the presented backbuffer. Staging an
-  // earlier pass grabbed ray's unlit or edge targets.
-  if (viewEffectCapture_.load(std::memory_order_acquire) && !nativeCaptureSurfaceActive())
+  // Macro frames are the image MMD presents. Staging an earlier pass grabbed
+  // ray's unlit or edge targets.
+  if (mmdOutputSizeConfigured_ && wantCapture_ && !nativeCaptureSurfaceActive())
     return;
   if (captureDeferPresents_.load(std::memory_order_acquire)) return;
   if (!device || !source || device != device_) return;
@@ -1538,6 +1538,22 @@ bool PluginHost::seekAnimationFrame(int frameIndex) {
     Diagnostics::instance().error("seekAnimationFrame: no MMD hwnd");
     return false;
   }
+  if (controller_.settings().cubemapFaces && !mmdOutputSizeConfigured_) {
+    int face = controller_.settings().resolvedFaceSize();
+    if (face < 64) face = 64;
+    if (face > 8192) face = 8192;
+    char msg[160];
+    std::snprintf(msg, sizeof(msg),
+                  "Macro capture: asking MMD to set output size %dx%d", face, face);
+    Diagnostics::instance().info(msg);
+    if (!timeline_.setOutputSize(face, face)) {
+      Diagnostics::instance().error(
+          "seekAnimationFrame: MMD output-size dialog failed; job cancelled");
+      return false;
+    }
+    mmdOutputSizeConfigured_ = true;
+    mmdOutputFaceSize_ = face;
+  }
   if (!timeline_.frameEdit() || !IsWindow(timeline_.frameEdit())) {
     if (!timeline_.bind(mmdHwnd_)) return false;
   }
@@ -1648,17 +1664,18 @@ bool PluginHost::renderView(const CameraState& cam, ImageBuffer& out) {
   }
 
   refreshBackbufferSize();
-  const int windowSide = (bbW_ > 0 && bbH_ > 0) ? (std::min)(bbW_, bbH_) : 0;
+  const int face = controller_.settings().resolvedFaceSize();
   capture_.setSquareCrop(true);
-  capture_.setDefaultMaxSide(windowSide);
+  // Keep MMD's presented pixels. Do not scale the grab up to the face size.
+  capture_.setDefaultMaxSide(0);
   {
     static int s_logged = 0;
-    if (s_logged < 1 && windowSide > 0) {
+    if (s_logged < 1) {
       ++s_logged;
-      char msg[160];
+      char msg[192];
       std::snprintf(msg, sizeof(msg),
-                    "View effect: 90 degree square %d on the live frame (no second RT)",
-                    windowSide);
+                    "Macro capture: MMD output %dx%d, grab the presented frame only",
+                    face, face);
       Diagnostics::instance().info(msg);
     }
   }
@@ -1672,8 +1689,8 @@ bool PluginHost::renderView(const CameraState& cam, ImageBuffer& out) {
     std::lock_guard<std::mutex> lock(redrawMu_);
     captureReady_ = false;
     setCaptureArmed(true);
-    viewEffectCapture_.store(true, std::memory_order_release);
-    // The 90° view is installed before MME's BeginScene snapshot on this frame.
+    // MMD draws this face itself. Do not install a projection or a second RT.
+    viewEffectCapture_.store(false, std::memory_order_release);
     skipCaptures_ = 0;
     pendingCam_ = cam;
     preOverlayCandidateLogged_ = false;
@@ -1760,7 +1777,7 @@ bool PluginHost::renderView(const CameraState& cam, ImageBuffer& out) {
   std::snprintf(timeout, sizeof(timeout),
                 "renderView timed out after %d ms waiting for Present (view=%d; "
                 "MMD may be paused / not redrawing). Face skipped.",
-                waitBudgetMs, windowSide);
+                waitBudgetMs, face);
   Diagnostics::instance().error(timeout);
   return false;
 }
