@@ -319,6 +319,7 @@ void PluginHost::refreshBackbufferSize() {
 
 void PluginHost::setCaptureArmed(bool armed) {
   wantCapture_ = armed;
+  if (!armed) viewEffectCapture_.store(false, std::memory_order_release);
   SetMmdLocalGizmoSuppress(armed);
 }
 
@@ -727,6 +728,10 @@ void PluginHost::onBeforeStretchRect(
 
 void PluginHost::stagePreOverlaySource(
     IDirect3DDevice9* device, IDirect3DSurface9* source, const char* operation) {
+  // View-effect frames are read from the presented backbuffer. Staging an
+  // earlier pass grabbed ray's unlit or edge targets.
+  if (viewEffectCapture_.load(std::memory_order_acquire) && !nativeCaptureSurfaceActive())
+    return;
   if (captureDeferPresents_.load(std::memory_order_acquire)) return;
   if (!device || !source || device != device_) return;
   {
@@ -1030,6 +1035,94 @@ void orbitOffsetFromUi(const MmdCameraUiState& state, double& ox, double& oy, do
 
 }  // namespace
 
+bool PluginHost::applyViewEffectViewport(D3DVIEWPORT9& vp) const {
+  if (!viewEffectCapture_.load(std::memory_order_acquire)) return false;
+  if (nativeCaptureSurfaceActive()) return false;
+  if (bbW_ <= 0 || bbH_ <= 0) return false;
+  const int side = (std::min)(bbW_, bbH_);
+  if (side < 64) return false;
+  if (vp.X == 0 && vp.Y == 0 &&
+      vp.Width == static_cast<DWORD>(side) && vp.Height == static_cast<DWORD>(side))
+    return false;
+  const int tolW = bbW_ / 8 + 8;
+  const int tolH = bbH_ / 8 + 8;
+  if (std::abs(static_cast<int>(vp.Width) - bbW_) > tolW ||
+      std::abs(static_cast<int>(vp.Height) - bbH_) > tolH)
+    return false;
+  vp.X = 0;
+  vp.Y = 0;
+  vp.Width = static_cast<DWORD>(side);
+  vp.Height = static_cast<DWORD>(side);
+  return true;
+}
+
+void PluginHost::prepareViewEffectBeforeBegin(IDirect3DDevice9* device) {
+  sealReady_ = false;
+  sealSceneCamera_ = false;
+  if (!device || !wantCapture_ || !viewEffectCapture_.load(std::memory_order_acquire))
+    return;
+  if (nativeCaptureSurfaceActive()) return;
+  if (captureDeferPresents_.load(std::memory_order_acquire)) return;
+  controller_.camera().endOverride();
+  SetTransformOverrideEnabled(false);
+  refreshBackbufferSize();
+  D3DVIEWPORT9 vp{};
+  vp.MinZ = 0.f;
+  vp.MaxZ = 1.f;
+  vp.Width = static_cast<DWORD>(bbW_ > 0 ? bbW_ : 1);
+  vp.Height = static_cast<DWORD>(bbH_ > 0 ? bbH_ : 1);
+  if (applyViewEffectViewport(vp))
+    device->SetViewport(&vp);
+  if (!latchedCubemapCamera_.valid) return;
+
+  writeLatchedCubemapCamera(mmdApp_.load(std::memory_order_acquire),
+                            latchedCubemapCamera_);
+
+  const MmdCameraUiState& s = latchedCubemapCamera_;
+  double ox = 0.0, oy = 0.0, oz = 0.0;
+  orbitOffsetFromUi(s, ox, oy, oz);
+  const Vec3 eye{static_cast<float>(s.x + ox), static_cast<float>(s.y + oy),
+                 static_cast<float>(s.z + oz)};
+  const Vec3 target{static_cast<float>(s.x), static_cast<float>(s.y),
+                    static_cast<float>(s.z)};
+  Vec3 up{0.f, 1.f, 0.f};
+  const Vec3 forward = normalize(sub(target, eye));
+  if (std::fabs(dot(forward, up)) > 0.95f)
+    up = {0.f, 0.f, 1.f};
+
+  float zNear = 0.1f;
+  float zFar = 10000.f;
+  D3DMATRIX currentProj{};
+  if (SUCCEEDED(device->GetTransform(D3DTS_PROJECTION, &currentProj))) {
+    Mat4 current{};
+    std::memcpy(current.m, currentProj.m, sizeof(current.m));
+    float nearPlane = 0.f, farPlane = 0.f;
+    if (extractPerspectiveNearFar(current, nearPlane, farPlane) &&
+        nearPlane > 0.f && farPlane > nearPlane) {
+      zNear = nearPlane;
+      zFar = farPlane;
+    }
+  }
+
+  const Mat4 viewMat = lookAtRH(eye, target, up);
+  const Mat4 projMat = perspectiveRH(90.f, 1.f, zNear, zFar);
+  D3DMATRIX view{}, proj{};
+  std::memcpy(view.m, viewMat.m, sizeof(float) * 16);
+  std::memcpy(proj.m, projMat.m, sizeof(float) * 16);
+  device->SetTransform(D3DTS_VIEW, &view);
+  device->SetTransform(D3DTS_PROJECTION, &proj);
+  sealedView_ = view;
+  sealedProj_ = proj;
+  sealViewDone_ = false;
+  sealProjDone_ = false;
+  sealReady_ = true;
+  double box = 0.0, boy = 0.0, boz = 0.0;
+  orbitOffsetFromUi(nativeCameraBase_, box, boy, boz);
+  sealBaseEye_ = Vec3{static_cast<float>(nativeCameraBase_.x + box),
+                      static_cast<float>(nativeCameraBase_.y + boy),
+                      static_cast<float>(nativeCameraBase_.z + boz)};
+}
+
 void PluginHost::prepareNativeCaptureBeforeBegin(IDirect3DDevice9* device) {
   sealReady_ = false;
   sealSceneCamera_ = false;
@@ -1142,7 +1235,9 @@ void PluginHost::onBeginScene(IDirect3DDevice9* device) {
   havePendingObservedView_ = false;
   // The motion camera key overwrites the edit boxes before this point. Put the
   // cubemap face back so ray-mmd's lighting and main view share that direction.
-  if (wantCapture_ && latchedCubemapCamera_.valid && nativeCaptureSurfaceActive()) {
+  if (wantCapture_ && latchedCubemapCamera_.valid &&
+      (nativeCaptureSurfaceActive() ||
+       viewEffectCapture_.load(std::memory_order_acquire))) {
     writeLatchedCubemapCamera(mmdApp_.load(std::memory_order_acquire),
                               latchedCubemapCamera_);
   }
@@ -1443,44 +1538,6 @@ bool PluginHost::seekAnimationFrame(int frameIndex) {
     Diagnostics::instance().error("seekAnimationFrame: no MMD hwnd");
     return false;
   }
-  const auto settings = controller_.settings();
-  if (settings.cubemapFaces && !mmdOutputSizeConfigured_) {
-    // MMD's output-size dialog alone leaves the live renderer at the viewport
-    // size. Use its native AVI recorder target setup (without AVI writing) so
-    // faces are rendered into a real high-resolution color surface.
-    int face = settings.resolvedFaceSize();
-    if (face > 8192) face = 8192;
-    if (face < 512) face = 512;
-    char attempt[128];
-    std::snprintf(attempt, sizeof(attempt),
-                  "seekAnimationFrame: requesting native MMD capture surface %dx%d",
-                  face, face);
-    Diagnostics::instance().info(attempt);
-    nativeCaptureFaceSize_.store(face, std::memory_order_release);
-    nativeCaptureState_.store(1, std::memory_order_release);
-    timeline_.suppressViewportOverlays();
-    InvalidateRect(mmdHwnd_, nullptr, FALSE);
-    PostMessageW(mmdHwnd_, WM_PAINT, 0, 0);
-
-    std::unique_lock<std::mutex> lock(redrawMu_);
-    bool settled = false;
-    for (int i = 0; i < 300 && !controller_.isCancelled(); ++i) {
-      settled = redrawCv_.wait_for(lock, std::chrono::milliseconds(100), [&] {
-        const int state = nativeCaptureState_.load(std::memory_order_acquire);
-        return state == 3 || state == -1;
-      });
-      if (settled) break;
-    }
-    const int state = nativeCaptureState_.load(std::memory_order_acquire);
-    lock.unlock();
-    if (state != 3 || !mmdOutputSizeConfigured_) {
-      Diagnostics::instance().error(
-          "seekAnimationFrame: native MMD high-resolution target was not activated; job cancelled");
-      return false;
-    }
-    Diagnostics::instance().info(
-        "seekAnimationFrame: native MMD high-resolution target ready");
-  }
   if (!timeline_.frameEdit() || !IsWindow(timeline_.frameEdit())) {
     if (!timeline_.bind(mmdHwnd_)) return false;
   }
@@ -1590,10 +1647,21 @@ bool PluginHost::renderView(const CameraState& cam, ImageBuffer& out) {
     return false;
   }
 
-  const int faceMax = controller_.settings().resolvedFaceSize();
-  capture_.setSquareCrop(true);
-  capture_.setDefaultMaxSide(faceMax);
   refreshBackbufferSize();
+  const int windowSide = (bbW_ > 0 && bbH_ > 0) ? (std::min)(bbW_, bbH_) : 0;
+  capture_.setSquareCrop(true);
+  capture_.setDefaultMaxSide(windowSide);
+  {
+    static int s_logged = 0;
+    if (s_logged < 1 && windowSide > 0) {
+      ++s_logged;
+      char msg[160];
+      std::snprintf(msg, sizeof(msg),
+                    "View effect: 90 degree square %d on the live frame (no second RT)",
+                    windowSide);
+      Diagnostics::instance().info(msg);
+    }
+  }
   onMainRt_ = true;
   mainPassDrawn_ = false;
   didReplaceThisFrame_ = false;
@@ -1604,8 +1672,8 @@ bool PluginHost::renderView(const CameraState& cam, ImageBuffer& out) {
     std::lock_guard<std::mutex> lock(redrawMu_);
     captureReady_ = false;
     setCaptureArmed(true);
-    // Camera fields are rewritten in BeginScene, so the Present of this face
-    // already has the cubemap direction. Do not drop it.
+    viewEffectCapture_.store(true, std::memory_order_release);
+    // The 90° view is installed before MME's BeginScene snapshot on this frame.
     skipCaptures_ = 0;
     pendingCam_ = cam;
     preOverlayCandidateLogged_ = false;
@@ -1646,7 +1714,7 @@ bool PluginHost::renderView(const CameraState& cam, ImageBuffer& out) {
   // viewport paint interval before it reaches Present. The first face after
   // an output-size Reset is particularly expensive. Keep smaller jobs
   // responsive while allowing the requested full-resolution frame to finish.
-  const int waitBudgetMs = faceMax >= 8192 ? 60000 : faceMax >= 4096 ? 30000 : 10000;
+  const int waitBudgetMs = 15000;
   constexpr int kWaitSliceMs = 50;
   const int maxWaits = waitBudgetMs / kWaitSliceMs;
   for (int i = 0; i < maxWaits; ++i) {
@@ -1690,9 +1758,9 @@ bool PluginHost::renderView(const CameraState& cam, ImageBuffer& out) {
 
   char timeout[192];
   std::snprintf(timeout, sizeof(timeout),
-                "renderView timed out after %d ms waiting for Present (face=%d; "
+                "renderView timed out after %d ms waiting for Present (view=%d; "
                 "MMD may be paused / not redrawing). Face skipped.",
-                waitBudgetMs, faceMax);
+                waitBudgetMs, windowSide);
   Diagnostics::instance().error(timeout);
   return false;
 }

@@ -49,6 +49,9 @@ public:
   // Bind the face RT and cubemap camera before MME's BeginScene snapshot.
   // Does not keep a transform override; ray-mmd sets its own matrices later.
   void prepareNativeCaptureBeforeBegin(IDirect3DDevice9* device);
+  // Our 90° view on MMD's own backbuffer, before MME snapshots. No second RT.
+  void prepareViewEffectBeforeBegin(IDirect3DDevice9* device);
+  bool applyViewEffectViewport(D3DVIEWPORT9& vp) const;
   // MMD reapplies the motion camera after BeginScene. Replace that one pair
   // only. Later ray-mmd matrices must pass through or materials drop out.
   bool consumeSealedSceneTransform(D3DTRANSFORMSTATETYPE state, const D3DMATRIX* incoming,
@@ -112,6 +115,8 @@ private:
   std::condition_variable redrawCv_;
   bool wantCapture_ = false;
   std::atomic<bool> captureDeferPresents_{false};
+  // Cubemap faces use a 90° projection on the live frame. Ray keeps that RT.
+  std::atomic<bool> viewEffectCapture_{false};
   bool captureReady_ = false;
   std::atomic<bool> wantEvict_{false};
   // Armed by job worker; executed on Present (D3D thread) only.

@@ -210,6 +210,8 @@ static HRESULT WINAPI Hook_SetRenderTarget(IDirect3DDevice9* self, DWORD index, 
 static HRESULT WINAPI Hook_SetViewport(IDirect3DDevice9* self, const D3DVIEWPORT9* vp) {
   if (!vp) return g_SetViewport(self, vp);
   D3DVIEWPORT9 expanded = *vp;
+  if (PluginHost::instance().applyViewEffectViewport(expanded))
+    return g_SetViewport(self, &expanded);
   if (PluginHost::instance().expandNativeCaptureViewport(expanded))
     return g_SetViewport(self, &expanded);
   return g_SetViewport(self, vp);
@@ -227,6 +229,8 @@ static HRESULT WINAPI Hook_BeginScene(IDirect3DDevice9* self) {
   // cubemap on the pre-light buffer.
   if (PluginHost::instance().nativeCaptureSurfaceActive())
     PluginHost::instance().prepareNativeCaptureBeforeBegin(self);
+  else
+    PluginHost::instance().prepareViewEffectBeforeBegin(self);
   HRESULT hr = g_BeginScene(self);
   if (SUCCEEDED(hr)) {
     if (PluginHost::instance().nativeCaptureSurfaceActive())
